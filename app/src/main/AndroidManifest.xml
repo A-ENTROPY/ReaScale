@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 图像读取（M0 只读相册，M7 才需要完整权限） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <!-- 通知（Android 13+ 必须） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 批处理前台服务（M7 才用） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 大文件保存（API ≤ 28 兼容用） -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- M0 无 NDK，无 GPU 加速硬要求；M2+ 加 Vulkan/GL_EXT 过滤 -->
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
+
+    <application
+        android:name=".ReaScaleApp"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        tools:ignore="MissingApplicationIcon"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.ReaScale.Splash"
+        tools:targetApi="35"
+        tools:replace="android:allowBackup">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|fontScale|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.ReaScale.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+    </application>
+
+</manifest>

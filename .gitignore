@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android / IDE
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+
+# Kotlin
+.kotlin/
+
+# 构建中间产物与备份
+*.apk
+*.aab
+*.so.bak
+*.aar.bak
+app/libs/*.aar
+
+# 日志与临时
+*.log
+*.tmp
+
+# 参考 app（第三方反编译素材：base.apk + jadx 输出，不入库）
+参考 app/

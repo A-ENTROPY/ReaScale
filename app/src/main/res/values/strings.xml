@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ReaScale</string>
+    <string name="app_tagline">离线 AI 图像超分辨率引擎</string>
+
+    <!-- 导航 -->
+    <string name="nav_home">主页</string>
+    <string name="nav_queue">队列</string>
+    <string name="nav_engines">引擎</string>
+    <string name="nav_settings">设置</string>
+
+    <!-- 主页面 -->
+    <string name="home_pick_image">选择图片</string>
+    <string name="home_pick_subtitle">照片 · 文件夹 · URL</string>
+    <string name="home_recent">最近</string>
+    <string name="home_no_recent">还没有处理过图片</string>
+    <string name="home_queue_idle">无活动队列</string>
+    <string name="home_quick_actions">快捷操作</string>
+    <string name="home_action_batch">批处理</string>
+    <string name="home_action_engines">引擎管理</string>
+    <string name="home_action_settings">设置</string>
+
+    <!-- 引擎页 -->
+    <string name="engines_title">引擎</string>
+    <string name="engines_my">我的引擎</string>
+    <string name="engines_builtin">内置</string>
+    <string name="engines_user">自导入</string>
+    <string name="engines_import">+ 导入 NCNN 模型</string>
+    <string name="engines_empty">还没有引擎</string>
+    <string name="engines_verified">已验证</string>
+    <string name="engines_unverified">未验证</string>
+    <string name="engines_risky">风险模型</string>
+    <string name="engines_search">搜索引擎</string>
+
+    <!-- 队列页 -->
+    <string name="queue_title">批处理</string>
+    <string name="queue_new">+ 新建批处理</string>
+    <string name="queue_running">运行中</string>
+    <string name="queue_completed">已完成</string>
+    <string name="queue_pending">待处理</string>
+    <string name="queue_failed">失败</string>
+    <string name="queue_pause_all">⏸ 全部暂停</string>
+    <string name="queue_cancel_all">⏹ 全部取消</string>
+    <string name="queue_clear_done">🗑 清空已完成</string>
+    <string name="queue_empty">还没有批处理任务</string>
+    <string name="queue_empty_subtitle">到主页选择 1-5000 张图片开始</string>
+    <string name="queue_eta">预计剩余 %1$s</string>
+    <string name="queue_idle">队列空闲</string>
+    <string name="queue_summary">运行中 %1$d · 总计 %2$d</string>
+    <string name="queue_waiting">等待中</string>
+
+    <!-- 设置页 -->
+    <string name="settings_title">设置</string>
+    <string name="settings_appearance">外观</string>
+    <string name="settings_theme">主题</string>
+    <string name="settings_theme_system">跟随系统</string>
+    <string name="settings_theme_light">浅色</string>
+    <string name="settings_theme_dark">深色</string>
+    <string name="settings_dynamic_color">动态取色（Material You）</string>
+    <string name="settings_amoled">AMOLED 纯黑</string>
+    <string name="settings_processing">处理</string>
+    <string name="settings_default_engine">默认引擎</string>
+    <string name="settings_default_format">默认格式</string>
+    <string name="settings_default_quality">默认质量</string>
+    <string name="settings_tile_size">Tile 大小</string>
+    <string name="settings_naming_rule">命名规则</string>
+    <string name="settings_concurrency">并发策略</string>
+    <string name="settings_concurrency_eco">省电</string>
+    <string name="settings_concurrency_balanced">平衡</string>
+    <string name="settings_concurrency_perf">性能</string>
+    <string name="settings_run_in_background">锁屏也跑</string>
+    <string name="settings_perf">性能与诊断</string>
+    <string name="settings_backend_pref">后端偏好</string>
+    <string name="settings_memory_mode">内存模式</string>
+    <string name="settings_about">关于</string>
+    <string name="settings_version">版本</string>
+    <string name="settings_github">GitHub</string>
+    <string name="settings_license">开源许可</string>
+    <string name="settings_help">帮助</string>
+
+    <!-- 通用 -->
+    <string name="common_back">返回</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_confirm">确定</string>
+    <string name="common_save">保存</string>
+    <string name="common_share">分享</string>
+    <string name="common_retry">重试</string>
+    <string name="common_delete">删除</string>
+    <string name="common_more">更多</string>
+    <string name="common_loading">加载中…</string>
+    <string name="common_pending">待处理</string>
+    <string name="common_running">运行中</string>
+    <string name="common_completed">已完成</string>
+    <string name="common_failed">失败</string>
+</resources>

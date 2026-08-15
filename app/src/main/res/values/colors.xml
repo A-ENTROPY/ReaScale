@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="reascale_primary">#FF3B6FE0</color>
+    <color name="reascale_on_primary">#FFFFFFFF</color>
+    <color name="reascale_background">#FFFDFBFF</color>
+    <color name="reascale_tertiary">#FFC77B30</color>
+</resources>

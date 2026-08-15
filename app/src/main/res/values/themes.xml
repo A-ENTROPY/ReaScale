@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动主题（先用 Material 3 基础主题；M1 替换为品牌色） -->
+    <style name="Theme.ReaScale.Splash" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">#3B6FE0</item>
+        <item name="android:windowBackground">#FDFBFF</item>
+    </style>
+</resources>

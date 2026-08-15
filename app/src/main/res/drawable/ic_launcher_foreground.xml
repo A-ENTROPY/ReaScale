@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 中心放大镜 + R 字母（ReaScale） -->
+    <group android:translateX="22" android:translateY="22">
+        <!-- R 字母 -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M10,8 L10,56 L18,56 L18,36 L26,36 L36,56 L46,56 L34,34 C40,32 44,28 44,21 C44,13 38,8 28,8 Z M18,16 L28,16 C32,16 36,18 36,22 C36,26 32,28 28,28 L18,28 Z" />
+        <!-- 放大镜右下方 -->
+        <path
+            android:fillColor="#FFC77B30"
+            android:strokeColor="#FFC77B30"
+            android:strokeWidth="2"
+            android:pathData="M48,46 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0 M54,52 L62,60" />
+    </group>
+</vector>
