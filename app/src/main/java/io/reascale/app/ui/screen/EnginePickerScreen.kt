@@ -35,7 +35,6 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -302,55 +301,21 @@ fun EnginePickerScreen(
     }
 
     // 删除确认对话框
-    // [FIX 2026-08-17] 是否删除模型文件改为可选（默认删除，可取消勾选保留文件）
+    // [FIX 2026-08-17 v2] 恢复"删除即清理模型文件"（可选保留会产生幽灵文件，
+    // 用户实测后确认该选项多余）
     showDeleteConfirm?.let { engine ->
-        var deleteFiles by remember(engine.id) { mutableStateOf(true) }
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text("删除引擎") },
-            text = {
-                Column {
-                    Text("确定要删除 ${engine.displayName} 吗？")
-                    Spacer(Modifier.height(Spacing.sm))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { deleteFiles = !deleteFiles },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Checkbox(
-                            checked = deleteFiles,
-                            onCheckedChange = { deleteFiles = it }
-                        )
-                        Spacer(Modifier.size(Spacing.xs))
-                        Text(
-                            "同时删除模型文件",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (deleteFiles) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    if (!deleteFiles) {
-                        Text(
-                            "模型文件将保留在应用内部存储中（下次可重新导入同一份文件）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            },
+            text = { Text("确定要删除 ${engine.displayName} 吗？模型文件也会一并删除。") },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        val ok = app.engineRepository.delete(engine.id, deleteFiles = deleteFiles)
+                        val ok = app.engineRepository.delete(engine.id)
                         showDeleteConfirm = null
                         selectedEngine = null
                         snackbarHostState.showSnackbar(
-                            when {
-                                !ok -> "内置引擎不可删除"
-                                deleteFiles -> "已删除（含模型文件）"
-                                else -> "已删除（保留模型文件）"
-                            }
+                            if (ok) "已删除" else "内置引擎不可删除"
                         )
                     }
                 }) {
@@ -367,10 +332,11 @@ fun EnginePickerScreen(
 }
 
 /**
- * 复制 SAF Uri → cacheDir/imports/<name>
- * [FIX 2026-08-17] 追加时间戳后缀避免同名文件互相覆盖；
- * 文件名解析健壮化：DISPLAY_NAME 查询失败时解码 lastPathSegment
- * （content://.../document/primary:Download/model.param 之类），而不是直接拼原始段
+ * 复制 SAF Uri → cacheDir/imports/<ts>/<name>
+ * [FIX 2026-08-17 v2] 时间戳改用目录层级（原为文件名前缀），
+ * 避免导入后显示名/模型名带一串数字（如 "1234567890_model"）。
+ * 不同批次导入在独立目录，同名文件不会互相覆盖；importOnnx 复制到
+ * models/<id>/ 目录（id 唯一），最终模型名保持用户原文件名。
  */
 private fun copySafToCache(context: Context, uri: Uri): File? {
     val name = context.contentResolver.query(uri, null, null, null, null)?.use { c ->
@@ -380,7 +346,7 @@ private fun copySafToCache(context: Context, uri: Uri): File? {
         android.net.Uri.decode(it)?.substringAfterLast('/')?.substringAfterLast(':')
     }?.takeIf { it.isNotBlank() } ?: "imported.param"
     val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
-    val dest = File(context.cacheDir, "imports/${System.currentTimeMillis()}_$safeName").apply {
+    val dest = File(context.cacheDir, "imports/${System.currentTimeMillis()}/$safeName").apply {
         parentFile?.mkdirs()
     }
     return runCatching {

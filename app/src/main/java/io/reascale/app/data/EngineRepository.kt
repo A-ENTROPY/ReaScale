@@ -203,23 +203,20 @@ class EngineRepository(private val context: Context) {
     }
 
     /**
-     * 删除用户导入的引擎（内置不可删）
+     * 删除导入的引擎（内置不可删）
      *
-     * @param deleteFiles [FIX 2026-08-17] 是否同时删除模型文件。
-     *        false 时仅移除档案，模型文件保留在内部存储（可用于重新导入/备份）
+     * [FIX 2026-08-17 v2] 删除即清理模型文件（用户实测确认"可选保留"会产生幽灵文件）
      */
-    suspend fun delete(id: String, deleteFiles: Boolean = true): Boolean = withContext(Dispatchers.IO) {
+    suspend fun delete(id: String): Boolean = withContext(Dispatchers.IO) {
         mutex.withLock {
             val list = _profiles.value
             val target = list.firstOrNull { it.id == id } ?: return@withContext false
             if (target.source == EngineSource.BUILTIN) return@withContext false
             val next = list.filterNot { it.id == id }
             persist(next)
-            if (deleteFiles) {
-                // 删除模型文件：旧 ONNX 布局 models/<id>.onnx + NCNN 布局 models/<id>/ 目录
-                File(modelsDir, "$id.onnx").delete()
-                File(modelsDir, id).deleteRecursively()
-            }
+            // 删除模型文件：旧 ONNX 布局 models/<id>.onnx + NCNN 布局 models/<id>/ 目录
+            File(modelsDir, "$id.onnx").delete()
+            File(modelsDir, id).deleteRecursively()
             true
         }
     }
@@ -302,6 +299,10 @@ class EngineRepository(private val context: Context) {
                 ?: src.nameWithoutExtension.take(32)
             // ncnn 模型 modelUri 指向 .param 文件路径（ImageProcessor 据此路由）
             val modelUri = dst.absolutePath
+            // [FIX 2026-08-17 v2] 模型体积显示权重文件(.bin)大小——.param 是几 KB 的结构
+            // 文本，旧实现显示 0MB/0B。统一 KB/MB 格式化
+            val binFile = File(modelDir2, dst.name.replace(".param", ".bin"))
+            val totalBytes = sizeBytes + (binFile.length())
             val profile = EngineProfile(
                 id = id,
                 displayName = displayName,
@@ -319,7 +320,7 @@ class EngineRepository(private val context: Context) {
                     fixedSize = probe.fixedSize,
                     channels = 3
                 ),
-                note = "${(sizeBytes / 1024 / 1024)}MB · ${probe.probeNote} · NCNN 模型",
+                note = "${formatSize(totalBytes)} · ${probe.probeNote} · NCNN 模型",
                 sha256 = "" // TODO M4: 算 SHA256
             )
 
@@ -336,4 +337,11 @@ class EngineRepository(private val context: Context) {
      */
     fun isBuiltin(id: String): Boolean =
         _profiles.value.firstOrNull { it.id == id }?.source == EngineSource.BUILTIN
+
+    /** [FIX 2026-08-17] 字节数格式化：B / KB / MB */
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024L -> "${(bytes + 1024L * 512L) / (1024L * 1024L)}MB"
+        bytes >= 1024L -> "${(bytes + 512L) / 1024L}KB"
+        else -> "${bytes}B"
+    }
 }
