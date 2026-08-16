@@ -376,12 +376,8 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
                 Column {
                     allFormats.forEach { f ->
                         val ok = io.reascale.app.core.processing.MediaStoreWriter.isFormatSupported(f)
-                        val note = when {
-                            ok -> ""
-                            f == OutputFormat.JXL -> "（开发中）"
-                            f == OutputFormat.AVIF -> "（需 Android 11+ 且设备支持 AV1）"
-                            else -> "（需 Android 9+）"
-                        }
+                        // [FIX 2026-08-17] AVIF 已内置软件编码，全设备可用；仅 HEIC/HEIF 需 Android 9+
+                        val note = if (ok) "" else "（需 Android 9+）"
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()

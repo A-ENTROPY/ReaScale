@@ -10,15 +10,16 @@ plugins {
 
 android {
     namespace = "io.reascale.app"
-    compileSdk = 35
+    // [FIX 2026-08-17] 36：avif-coder 要求 minCompileSdk 36（AGP 8.5.2 用 suppress 压制警告）
+    compileSdk = 36
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "0.3.1-a24"
+        versionCode = 15
+        versionName = "0.3.1-a26"
         vectorDrawables { useSupportLibrary = true }
 
         ndk {
@@ -53,8 +54,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    // [FIX 2026-08-17] Kotlin 2.3 移除 kotlinOptions DSL，改用 compilerOptions
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
@@ -122,6 +126,11 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     // [FIX 2026-08-17] 次世代格式编码：AvifWriter（HEIC 用平台 HeifWriter，API 28+）
     implementation("androidx.heifwriter:heifwriter:1.1.0")
+    // [FIX 2026-08-17] JXL 编码：awxkee/jxl-coder（libjxl，Maven Central）
+    implementation("io.github.awxkee:jxl-coder:2.2.0")
+    // [FIX 2026-08-17] AVIF 编码：awxkee/avif-coder（libavif+libaom 软件编码，不依赖设备 AV1 硬件）
+    // 2.2.0（minSdk 24，无 compileSdk 36 要求）；2.2.1 要求 compileSdk 36
+    implementation("io.github.awxkee:avif-coder:2.2.0")
 
     // M7 队列（占位声明，M7 阶段才启用 Worker）
     implementation("androidx.work:work-runtime-ktx:2.9.1")

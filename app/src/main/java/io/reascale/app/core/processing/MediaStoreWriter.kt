@@ -3,7 +3,6 @@ package io.reascale.app.core.processing
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
-import android.media.MediaCodecList
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -69,17 +68,11 @@ object MediaStoreWriter {
     fun isFormatSupported(format: OutputFormat): Boolean = when (format) {
         OutputFormat.JPEG, OutputFormat.PNG, OutputFormat.WEBP -> true
         OutputFormat.HEIC, OutputFormat.HEIF -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
-        OutputFormat.AVIF -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasAv1Encoder()
-        OutputFormat.JXL -> false
-    }
-
-    /** 设备是否有 AV1 编码器（AVIF 必需） */
-    private fun hasAv1Encoder(): Boolean {
-        return runCatching {
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.any {
-                it.isEncoder && it.supportedTypes.contains("video/av1")
-            }
-        }.getOrDefault(false)
+        // [FIX 2026-08-17] AVIF：avif-coder 内置软件 AV1 编码（libavif+libaom），全设备可用，
+        // 不再依赖设备硬件 AV1 编码器（原实现仅 Android 11+ 且 MediaCodecList 有 AV1 才可用）
+        OutputFormat.AVIF -> true
+        // [FIX 2026-08-17] JXL：jxl-coder（libjxl）自带，API 21+ 全设备可用
+        OutputFormat.JXL -> true
     }
 
     /** 写入用户选择的 SAF 目录 */
@@ -177,11 +170,56 @@ object MediaStoreWriter {
                 context, bitmap, options, "heic",
                 { tmp -> encodeHeif(bitmap, options, tmp) }, out
             )
-            OutputFormat.AVIF -> encodeViaTempFile(
-                context, bitmap, options, "avif",
-                { tmp -> encodeAvif(bitmap, options, tmp) }, out
-            )
-            OutputFormat.JXL -> false
+            // [FIX 2026-08-17] AVIF：avif-coder 软件编码（libavif+libaom），返回 ByteArray 直接写出
+            OutputFormat.AVIF -> {
+                try {
+                    val q = QualityMapper.directQuality(options)
+                    val coder = com.radzivon.bartoshyk.avif.coder.HeifCoder()
+                    val bytes = coder.encodeAvif(
+                        bitmap, q,
+                        com.radzivon.bartoshyk.avif.coder.AvifSpeed.SIX,
+                        if (q >= 100) {
+                            com.radzivon.bartoshyk.avif.coder.PreciseMode.LOSSLESS
+                        } else {
+                            com.radzivon.bartoshyk.avif.coder.PreciseMode.LOSSY
+                        },
+                        com.radzivon.bartoshyk.avif.coder.AvifSurfaceMode.AUTO,
+                        com.radzivon.bartoshyk.avif.coder.AvifChromaSubsampling.AUTO
+                    )
+                    out.write(bytes)
+                    out.flush()
+                    true
+                } catch (t: Throwable) {
+                    false
+                }
+            }
+            // [FIX 2026-08-17] JXL：jxl-coder 2.2.0（libjxl）编码为 ByteArray，直接写出
+            OutputFormat.JXL -> {
+                try {
+                    val q = QualityMapper.directQuality(options)
+                    val bytes = com.awxkee.jxlcoder.JxlCoder.encode(
+                        bitmap,
+                        if (bitmap.hasAlpha()) {
+                            com.awxkee.jxlcoder.JxlChannelsConfiguration.RGBA
+                        } else {
+                            com.awxkee.jxlcoder.JxlChannelsConfiguration.RGB
+                        },
+                        if (q >= 100) {
+                            com.awxkee.jxlcoder.JxlCompressionOption.LOSSLESS
+                        } else {
+                            com.awxkee.jxlcoder.JxlCompressionOption.LOSSY
+                        },
+                        com.awxkee.jxlcoder.JxlEffort.FALCON,
+                        q,
+                        com.awxkee.jxlcoder.JxlDecodingSpeed.FAST
+                    )
+                    out.write(bytes)
+                    out.flush()
+                    true
+                } catch (t: Throwable) {
+                    false
+                }
+            }
         }
     }
 
@@ -219,26 +257,6 @@ object MediaStoreWriter {
                 bitmap.width,
                 bitmap.height,
                 androidx.heifwriter.HeifWriter.INPUT_MODE_BITMAP
-            ).setQuality(QualityMapper.directQuality(options)).build()
-            writer.start()
-            writer.addBitmap(bitmap)
-            writer.stop(0)
-            writer.close()
-            true
-        } catch (t: Throwable) {
-            false
-        }
-    }
-
-    /** AVIF：androidx AvifWriter（API 30+，需要设备 AV1 编码器） */
-    @RequiresApi(Build.VERSION_CODES.R)
-    private fun encodeAvif(bitmap: Bitmap, options: EncodeOptions, tmp: File): Boolean {
-        return try {
-            val writer = androidx.heifwriter.AvifWriter.Builder(
-                tmp.absolutePath,
-                bitmap.width,
-                bitmap.height,
-                androidx.heifwriter.AvifWriter.INPUT_MODE_BITMAP
             ).setQuality(QualityMapper.directQuality(options)).build()
             writer.start()
             writer.addBitmap(bitmap)
