@@ -120,17 +120,27 @@ object LogBus {
                 val crash = lower.contains("fatal") || lower.contains("unsatisfiedlink") ||
                     lower.contains("abort message") || lower.contains("sigsegv") ||
                     lower.contains("sigabrt") || lower.contains("jni detected") ||
-                    lower.contains("jni") || lower.contains("dlopen") ||
+                    lower.contains("dlopen") ||
                     lower.contains("process died") || lower.contains("was decommissioned")
-                // [FIX 2026-08-17] ReaScaleNcnn 的 C++ 诊断日志（probe-*/tile@/process）也镜像进 LogBus，
-                // 便于用户侧排查 ncnn 推理问题（探测/写回参数无法从 Kotlin 侧读取）
-                val reascaleDiag = lower.contains("probe-") || lower.contains("tile@") ||
-                    lower.contains("process:") || lower.contains("reascale")
-                if (mine && (crash || reascaleDiag)) {
+                // [FIX 2026-08-17 v2] 只镜像 tag=ReaScaleNcnn 的 C++ 诊断日志。
+                // 旧实现用 contains("reascale") 匹配整行：系统日志凡含包名 io.reascale.app.debug
+                // 的行（Activity 焦点/IME/GC/Surface 等）全被镜像并以 ERROR 显示，
+                // 导致调试日志满屏假报错（实测 1359 条噪音）。
+                val fromNcnnTag = lower.contains("reascalenccn:")
+                if (mine && (crash || fromNcnnTag)) {
                     mirroring.set(true)
                     try {
                         val clean = if (line.length > 400) line.take(400) + "…" else line
-                        log(Level.ERROR, "Logcat", clean)
+                        // [FIX v2] 按原始 logcat 级别显示（threadtime: 第 5 字段是优先级字母），
+                        // 不再把镜像行全部标成 ERROR 红色
+                        val prio = line.split(" ").getOrNull(4) ?: ""
+                        val level = when (prio) {
+                            "E" -> Level.ERROR
+                            "W" -> Level.WARN
+                            "D" -> Level.DEBUG
+                            else -> Level.INFO
+                        }
+                        log(level, "Logcat", clean)
                     } finally {
                         mirroring.set(false)
                     }
