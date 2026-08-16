@@ -35,6 +35,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -301,19 +302,55 @@ fun EnginePickerScreen(
     }
 
     // 删除确认对话框
+    // [FIX 2026-08-17] 是否删除模型文件改为可选（默认删除，可取消勾选保留文件）
     showDeleteConfirm?.let { engine ->
+        var deleteFiles by remember(engine.id) { mutableStateOf(true) }
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text("删除引擎") },
-            text = { Text("确定要删除 ${engine.displayName} 吗？模型文件也会一并删除。") },
+            text = {
+                Column {
+                    Text("确定要删除 ${engine.displayName} 吗？")
+                    Spacer(Modifier.height(Spacing.sm))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { deleteFiles = !deleteFiles },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = deleteFiles,
+                            onCheckedChange = { deleteFiles = it }
+                        )
+                        Spacer(Modifier.size(Spacing.xs))
+                        Text(
+                            "同时删除模型文件",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (deleteFiles) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (!deleteFiles) {
+                        Text(
+                            "模型文件将保留在应用内部存储中（下次可重新导入同一份文件）",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        val ok = app.engineRepository.delete(engine.id)
+                        val ok = app.engineRepository.delete(engine.id, deleteFiles = deleteFiles)
                         showDeleteConfirm = null
                         selectedEngine = null
                         snackbarHostState.showSnackbar(
-                            if (ok) "已删除" else "内置引擎不可删除"
+                            when {
+                                !ok -> "内置引擎不可删除"
+                                deleteFiles -> "已删除（含模型文件）"
+                                else -> "已删除（保留模型文件）"
+                            }
                         )
                     }
                 }) {

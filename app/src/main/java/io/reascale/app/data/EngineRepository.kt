@@ -202,17 +202,24 @@ class EngineRepository(private val context: Context) {
         }
     }
 
-    /** 删除用户导入的引擎（内置不可删） */
-    suspend fun delete(id: String): Boolean = withContext(Dispatchers.IO) {
+    /**
+     * 删除用户导入的引擎（内置不可删）
+     *
+     * @param deleteFiles [FIX 2026-08-17] 是否同时删除模型文件。
+     *        false 时仅移除档案，模型文件保留在内部存储（可用于重新导入/备份）
+     */
+    suspend fun delete(id: String, deleteFiles: Boolean = true): Boolean = withContext(Dispatchers.IO) {
         mutex.withLock {
             val list = _profiles.value
             val target = list.firstOrNull { it.id == id } ?: return@withContext false
             if (target.source == EngineSource.BUILTIN) return@withContext false
             val next = list.filterNot { it.id == id }
             persist(next)
-            // 删除模型文件：旧 ONNX 布局 models/<id>.onnx + NCNN 布局 models/<id>/ 目录
-            File(modelsDir, "$id.onnx").delete()
-            File(modelsDir, id).deleteRecursively()
+            if (deleteFiles) {
+                // 删除模型文件：旧 ONNX 布局 models/<id>.onnx + NCNN 布局 models/<id>/ 目录
+                File(modelsDir, "$id.onnx").delete()
+                File(modelsDir, id).deleteRecursively()
+            }
             true
         }
     }
