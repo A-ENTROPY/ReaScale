@@ -166,14 +166,21 @@ class NcnnEngine(
             // BASIC_DOWNSCALE：引擎做 baseScale，外层 ImageProcessor 下采样
             chainCount = 1
         }
-        // [FIX 2026-08-16] 3x 引擎 target=4 等非整除情况：
-        // 链式放大做不完 → 引擎只做 chainCount 次（尽量接近），
-        // 剩余由 ImageProcessor 的 factor 逻辑兜底（见 process 的缩放）
-        // 注意：chainCount 必须是目标能整除 baseScale 的次数，否则输出尺寸错
-        // 这里保持 chainCount 计算正确；ImageProcessor 侧 factor 需匹配实际输出
+
+        // [FIX 2026-08-17] tile 级实时进度：
+        // C++ 每完成一个 tile 回调 0..1；这里映射到链式放大的总进度（节流 1% 防抖）
+        var lastSent = -1f
+        fun emit(p: Float) {
+            val clamped = p.coerceIn(0f, 1f)
+            if (clamped - lastSent >= 0.01f || clamped >= 1f) {
+                lastSent = clamped
+                progress(clamped)
+            }
+        }
+        emit(0.02f)
 
         LogBus.i("NcnnEngine", "▶️ upscale START: in=${input.width}x${input.height}, baseScale=$nativeScale, target=$targetScale, chain=$chainCount, tileSize=$tileSize, prepad=$prepad, noise=$noise")
-        progress(0.3f)
+        progress(0.05f)
 
         var current = input
         var result: Bitmap = current
@@ -184,14 +191,17 @@ class NcnnEngine(
                     scale = nativeScale,
                     noise = noise,
                     tileSize = tileSize,
-                    prepadding = prepad
+                    prepadding = prepad,
+                    onProgress = { tileP ->
+                        // 本次 chain 内 tile 进度 → 全局进度
+                        emit((idx + tileP) / chainCount)
+                    }
                 )
                 if (idx < chainCount - 1 && current !== input && !current.isRecycled) {
                     current.recycle()
                 }
                 current = r
                 result = r
-                progress(0.3f + (idx + 1).toFloat() / chainCount * 0.6f)
             }
         } catch (t: Throwable) {
             // [FIX 2026-08-11] process 失败 = 引擎状态损坏，释放后重建
@@ -200,7 +210,7 @@ class NcnnEngine(
             throw t
         }
         LogBus.i("NcnnEngine", "✅ upscale OK: out=${result.width}x${result.height} (chain=$chainCount)")
-        progress(1.0f)
+        emit(1f)
         return result
     }
 

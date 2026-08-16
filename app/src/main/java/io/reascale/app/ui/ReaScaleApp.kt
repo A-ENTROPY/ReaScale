@@ -163,7 +163,8 @@ fun handlePickedImages(
     context: android.content.Context,
     uris: List<Uri>,
     engineId: String,
-    targetScale: Int
+    targetScale: Int,
+    settings: io.reascale.app.data.AppSettings = io.reascale.app.data.AppSettings()
 ) {
     try {
         val app = ReaScaleApp.get()
@@ -190,7 +191,9 @@ fun handlePickedImages(
                             sourceHeight = meta.height,
                             engineId = engineId,
                             upscalePlan = UpscalePlan(targetScale = targetScale),
-                            encodeOptions = EncodeOptions()
+                            // [FIX 2026-08-17] 使用设置页配置的默认格式/质量
+                            // （原固定 EncodeOptions()，设置页的默认格式/质量形同虚设）
+                            encodeOptions = settings.encodeOptions
                         )
                     } catch (t: Throwable) {
                         android.util.Log.w("handlePickedImages", "skip uri=$uri", t)

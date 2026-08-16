@@ -17,6 +17,14 @@ class ReascaleNcnn {
         }
     }
 
+    /**
+     * C++ 推理进度回调（每完成一个 tile 回调一次，0..1）
+     * [FIX 2026-08-17] tile 级实时进度，替代原先"一段段跳"
+     */
+    interface NcnnProgressListener {
+        fun onProgress(p: Float)
+    }
+
     // 原生句柄
     private var nativeHandle: Long = 0
 
@@ -37,7 +45,7 @@ class ReascaleNcnn {
         paramPath: String,
         binPath: String
     ): Boolean
-    /** 推理 */
+    /** 推理（listener 可为 null；每完成一个 tile 回调 onProgress(done/total)） */
     private external fun nativeProcess(
         handle: Long,
         input: Bitmap,
@@ -45,7 +53,8 @@ class ReascaleNcnn {
         scale: Int,
         noise: Int,
         tileSize: Int,
-        prepadding: Int
+        prepadding: Int,
+        listener: NcnnProgressListener?
     ): Boolean
     private external fun nativeSetScale(handle: Long, scale: Int)
     private external fun nativeSetTileSize(handle: Long, tile: Int)
@@ -74,7 +83,8 @@ class ReascaleNcnn {
         scale: Int,
         noise: Int = -1,
         tileSize: Int = 0,
-        prepadding: Int = 0
+        prepadding: Int = 0,
+        onProgress: ((Float) -> Unit)? = null
     ): Bitmap {
         // [FIX 2026-08-09] 必须先同步 native 的 s->scale，否则 native 尺寸校验
         // 用默认值 2 去比对实际输出（如 4x），返回 false → "ncnn process 失败"
@@ -82,7 +92,12 @@ class ReascaleNcnn {
         val outW = (input.width * scale).coerceAtLeast(1)
         val outH = (input.height * scale).coerceAtLeast(1)
         val output = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-        val ok = nativeProcess(nativeHandle, input, output, scale, noise, tileSize, prepadding)
+        val listener = if (onProgress != null) {
+            object : NcnnProgressListener {
+                override fun onProgress(p: Float) { onProgress(p) }
+            }
+        } else null
+        val ok = nativeProcess(nativeHandle, input, output, scale, noise, tileSize, prepadding, listener)
         if (!ok) throw IllegalStateException("ncnn process 失败")
         return output
     }

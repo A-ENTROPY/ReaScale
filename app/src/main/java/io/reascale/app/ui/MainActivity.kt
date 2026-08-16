@@ -40,6 +40,14 @@ class MainActivity : ComponentActivity() {
 
         Log.i("MainActivity", "onCreate start")
 
+        // [FIX 2026-08-17] Android 13+ 通知权限（前台服务通知需要）
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
+            android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 100)
+        }
+
         // 直接在 Activity 上注册 launcher（不通过 PhotoPicker 封装）—— 更稳
         try {
             pickImagesLauncher = registerForActivityResult(
@@ -65,7 +73,8 @@ class MainActivity : ComponentActivity() {
                                 context = this@MainActivity,
                                 uris = uris,
                                 engineId = settings.defaultEngineId,
-                                targetScale = targetScale
+                                targetScale = targetScale,
+                                settings = settings
                             )
                         } catch (t: Throwable) {
                             Log.e("MainActivity", "picker handler inner failed", t)

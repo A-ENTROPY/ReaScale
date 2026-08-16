@@ -17,8 +17,8 @@ android {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.1-a20"
+        versionCode = 10
+        versionName = "0.3.1-a21"
         vectorDrawables { useSupportLibrary = true }
 
         ndk {

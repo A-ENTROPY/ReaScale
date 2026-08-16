@@ -112,9 +112,9 @@ class ImageProcessor(
                 val src = safeDecodeBitmap(context, srcUri, meta.width, meta.height)
                     ?: throw IllegalStateException("解码失败")
                 try {
-                    progress(0.30f)
+                    // [FIX 2026-08-17] 引擎 tile 级进度 → 平滑映射 0.10..0.90
                     engine.upscale(src, job.upscalePlan) { p ->
-                        progress(0.30f + p * 0.55f)
+                        progress(0.10f + p * 0.80f)
                     }
                 } finally {
                     if (!src.isRecycled) src.recycle()
@@ -242,10 +242,13 @@ class ImageProcessor(
             val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
                 ?: throw IllegalStateException("分块解码失败 at $rect")
             try {
+                // [FIX 2026-08-17] 块内引擎进度也细分：总进度 = (已处理块 + 块内进度) / 总块数
                 val upscaledTile = engine.upscale(
                     input = tileBmp,
                     plan = io.reascale.app.data.UpscalePlan(targetScale = factor),
-                    progress = { /* 块内进度不细分 */ }
+                    progress = { p ->
+                        progress(0.10f + ((processedTiles + p) / tileCount) * 0.80f)
+                    }
                 )
                 try {
                     val tileOutX = tile.x * factor

@@ -46,6 +46,8 @@ class QueueRunner(
     private var schedulerJob: Job? = null
     /** jobId → worker Job（取消单个任务时联动取消 worker） */
     private val activeWorkers = mutableMapOf<String, Job>()
+    // [FIX 2026-08-17] 前台服务状态（"锁屏也跑"）：有活跃任务时启动，空闲时停止
+    private var fgServiceStarted = false
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
@@ -89,6 +91,33 @@ class QueueRunner(
         runnerScope.launch { queue.cancelAll() }
     }
 
+    /**
+     * [FIX 2026-08-17] 前台服务联动（"锁屏也跑"）：
+     * 设置开启且队列有活跃任务 → startForegroundService；
+     * 队列空闲或设置关闭 → stopService。状态守卫避免频繁调用。
+     */
+    private fun syncForegroundService(enabled: Boolean) {
+        val hasActive = activeWorkers.isNotEmpty()
+        if (enabled && hasActive && !fgServiceStarted) {
+            try {
+                context.startForegroundService(
+                    android.content.Intent(context, io.reascale.app.service.ProcessingForegroundService::class.java)
+                )
+                fgServiceStarted = true
+            } catch (t: Throwable) {
+                // Android 12+ 后台启动限制 / 通知权限缺失等：忽略，不影响处理
+                android.util.Log.w("QueueRunner", "startForegroundService failed", t)
+            }
+        } else if ((!enabled || !hasActive) && fgServiceStarted) {
+            runCatching {
+                context.stopService(
+                    android.content.Intent(context, io.reascale.app.service.ProcessingForegroundService::class.java)
+                )
+            }
+            fgServiceStarted = false
+        }
+    }
+
     private suspend fun runSchedulerLoop() {
         val app = ReaScaleApp.get()
 
@@ -110,6 +139,9 @@ class QueueRunner(
 
                 // 清理已完成的 worker 引用
                 activeWorkers.entries.removeAll { !it.value.isActive }
+
+                // [FIX 2026-08-17] 前台服务联动：有活跃任务 → 启动；空闲 → 停止
+                syncForegroundService(settings.enableForegroundService)
 
                 // 取本批 PENDING
                 val pending = queue.dequeuePendingBatch(maxConcurrent - activeWorkers.size)

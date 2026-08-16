@@ -417,10 +417,13 @@ static bool process_tile(
 }
 
 // 推理：input Bitmap → output Bitmap（tile 分块）
+// [FIX 2026-08-17 v7] 增加进度回调：每完成一个 tile 回调 listener.onProgress(done/total)
+// 让 Kotlin 侧可以实时平滑显示进度（不再一段段跳）
 static jboolean session_process(
     JNIEnv* env, jobject thiz, jlong handle,
     jobject input_bmp, jobject output_bmp,
-    jint scale, jint noise, jint tile_size, jint prepadding
+    jint scale, jint noise, jint tile_size, jint prepadding,
+    jobject progress_listener
 ) {
     (void)noise;
     Session* s = reinterpret_cast<Session*>(handle);
@@ -475,6 +478,16 @@ static jboolean session_process(
         "process: in=%dx%d scale=%d tile=%d pad=%d tiles=%dx%d residual=%d probed_crop=%d",
         w, h, sc, tile_nopad, p, xtiles, ytiles, s->is_residual ? 1 : 0, s->probed_crop);
 
+    // 进度回调（listener.onProgress(float)），每 tile 一次
+    jmethodID on_progress = nullptr;
+    jclass listener_cls = nullptr;
+    if (progress_listener != nullptr) {
+        listener_cls = env->GetObjectClass(progress_listener);
+        on_progress = env->GetMethodID(listener_cls, "onProgress", "(F)V");
+    }
+    const int total_tiles = xtiles * ytiles;
+    int done_tiles = 0;
+
     bool ok = true;
     for (int yi = 0; yi < ytiles && ok; yi++) {
         for (int xi = 0; xi < xtiles; xi++) {
@@ -484,6 +497,11 @@ static jboolean session_process(
                     "tile(%d/%d,%d/%d) 失败", xi, xtiles, yi, ytiles);
                 ok = false;
                 break;
+            }
+            done_tiles++;
+            if (on_progress != nullptr) {
+                env->CallVoidMethod(progress_listener, on_progress,
+                    (jfloat)done_tiles / (jfloat)total_tiles);
             }
         }
     }
@@ -535,7 +553,7 @@ static JNINativeMethod gMethods[] = {
     {"nativeCreate",       "(IIZ)J",                              (void*)&session_new},
     {"nativeLoadFromAssets","(JLandroid/content/res/AssetManager;Ljava/lang/String;[B)Z", (void*)&session_load_assets},
     {"nativeLoadFromFile", "(JLjava/lang/String;Ljava/lang/String;)Z",          (void*)&session_load_from_file},
-    {"nativeProcess",      "(JLandroid/graphics/Bitmap;Landroid/graphics/Bitmap;IIII)Z", (void*)&session_process},
+    {"nativeProcess",      "(JLandroid/graphics/Bitmap;Landroid/graphics/Bitmap;IIIILio/reascale/app/core/engine/ReascaleNcnn$NcnnProgressListener;)Z", (void*)&session_process},
     {"nativeSetScale",     "(JI)V",                               (void*)&session_set_scale},
     {"nativeSetTileSize",  "(JI)V",                               (void*)&session_set_tile_size},
     {"nativeGetTileSize",  "(J)I",                                (void*)&session_get_tile_size},

@@ -44,6 +44,12 @@
             </intent-filter>
         </activity>
 
+        <!-- [FIX 2026-08-17] 队列处理前台服务（"锁屏也跑"设置项） -->
+        <service
+            android:name=".service.ProcessingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
     </application>
 
 </manifest>

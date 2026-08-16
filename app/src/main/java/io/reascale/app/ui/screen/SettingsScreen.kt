@@ -25,6 +25,7 @@ import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -34,18 +35,24 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,6 +60,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.reascale.app.R
 import io.reascale.app.ReaScaleApp
 import io.reascale.app.data.AppSettings
+import io.reascale.app.data.OutputFormat
 import io.reascale.app.data.ThemeMode
 import io.reascale.app.debug.LogBus
 import io.reascale.app.ui.theme.Spacing
@@ -73,9 +81,17 @@ import kotlinx.coroutines.launch
 fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
     val app = ReaScaleApp.get()
     val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val engineRepository = app.engineRepository
     val settings by app.settingsRepository.settingsFlow.collectAsStateWithLifecycle(
         initialValue = AppSettings()
     )
+    // [FIX 2026-08-17] 设置对话框状态（默认引擎/格式/质量/许可/帮助）
+    var showEnginePicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showFormatPicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showQualityPicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showLicenseDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showHelpDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -149,37 +165,37 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
             SettingsGroup(
                 title = stringResource(R.string.settings_processing),
                 icon = Icons.Outlined.Tune,
-                description = "默认引擎、输出格式、质量"
+                description = "默认引擎、输出格式、质量（新任务生效）"
             ) {
-                SettingsValueItem(
+                // [FIX 2026-08-17] 默认引擎可点击修改（原来只读展示且 id 截断显示）
+                val engineName = engineRepository.profiles.value.firstOrNull { it.id == settings.defaultEngineId }
+                    ?.displayName ?: settings.defaultEngineId
+                SettingsClickableItem(
                     icon = Icons.Outlined.Memory,
                     title = stringResource(R.string.settings_default_engine),
-                    value = settings.defaultEngineId.substringAfter('_').take(24)
+                    subtitle = engineName,
+                    onClick = { showEnginePicker = true }
                 )
                 SettingsDivider()
-                SettingsValueItem(
+                SettingsClickableItem(
                     icon = Icons.Outlined.Tune,
                     title = stringResource(R.string.settings_default_format),
-                    value = "${settings.encodeOptions.format.name} · Q${settings.encodeOptions.quality}"
+                    subtitle = formatDisplayName(settings.encodeOptions.format) +
+                        " · Q${settings.encodeOptions.quality}",
+                    onClick = { showFormatPicker = true }
                 )
                 SettingsDivider()
-                SettingsValueItem(
+                SettingsClickableItem(
                     icon = Icons.Outlined.ColorLens,
                     title = stringResource(R.string.settings_default_quality),
-                    value = "${settings.encodeOptions.quality}"
-                )
-                SettingsDivider()
-                SettingsValueItem(
-                    icon = Icons.Outlined.Memory,
-                    title = stringResource(R.string.settings_tile_size),
-                    // [FIX] 原实现误显示 maxQueueSize/1000；实际 tile 由引擎固定为 192
-                    value = "192 px (内置固定)"
+                    subtitle = "质量 ${settings.encodeOptions.quality}（1-100）",
+                    onClick = { showQualityPicker = true }
                 )
                 SettingsDivider()
                 SettingsSwitchItem(
                     icon = Icons.Outlined.PhotoCamera,
                     title = stringResource(R.string.settings_run_in_background),
-                    subtitle = "大队列时显示前台通知",
+                    subtitle = "队列运行中显示前台通知，锁屏也继续处理",
                     checked = settings.enableForegroundService,
                     onCheckedChange = { v ->
                         scope.launch {
@@ -193,15 +209,9 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
             SettingsGroup(
                 title = stringResource(R.string.settings_perf),
                 icon = Icons.Outlined.Memory,
-                description = "推理后端、内存策略"
+                description = "同时处理的图片数量（影响发热与速度）"
             ) {
-                SettingsValueItem(
-                    icon = Icons.Outlined.Memory,
-                    title = stringResource(R.string.settings_backend_pref),
-                    value = "自动 · NNAPI / XNNPACK / CPU"
-                )
-                SettingsDivider()
-                // 性能模式（SegmentedButton 单选）
+                // [FIX 2026-08-17] 移除无效的"后端偏好"死项（实际统一走 ncnn CPU 推理）
                 ConcurrencySelector(
                     current = settings.concurrency,
                     onChange = { profile ->
@@ -218,28 +228,33 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
                 icon = Icons.Outlined.Code,
                 description = null
             ) {
+                // [FIX 2026-08-17] 版本号动态读取（原硬编码 0.3.1-a15 已过时）
                 SettingsValueItem(
                     icon = Icons.Outlined.Code,
                     title = stringResource(R.string.settings_version),
-                    value = "0.3.1-a15 (2026-08-17)"
+                    value = versionName(context)
                 )
                 SettingsDivider()
+                // [FIX 2026-08-17] GitHub/License/Help 原来无 onClick（死链），现在可点击
                 SettingsLinkItem(
                     icon = Icons.Outlined.Code,
                     title = stringResource(R.string.settings_github),
-                    subtitle = "github.com/reascale/app"
+                    subtitle = "开源项目（查看源码）",
+                    onClick = { openUrl(context, "https://github.com/search?q=reascale") }
                 )
                 SettingsDivider()
                 SettingsLinkItem(
                     icon = Icons.Outlined.Code,
                     title = stringResource(R.string.settings_license),
-                    subtitle = "Apache-2.0"
+                    subtitle = "模型：MIT / 代码：Apache-2.0",
+                    onClick = { showLicenseDialog = true }
                 )
                 SettingsDivider()
                 SettingsLinkItem(
                     icon = Icons.Outlined.Help,
                     title = stringResource(R.string.settings_help),
-                    subtitle = null
+                    subtitle = "使用说明",
+                    onClick = { showHelpDialog = true }
                 )
             }
 
@@ -259,6 +274,197 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
 
             Spacer(Modifier.height(Spacing.lg))
         }
+    }
+
+    // === [FIX 2026-08-17] 设置对话框 ===
+
+    // 默认引擎选择
+    if (showEnginePicker) {
+        val profiles = engineRepository.profiles.value
+        AlertDialog(
+            onDismissRequest = { showEnginePicker = false },
+            title = { Text("默认引擎") },
+            text = {
+                Column {
+                    profiles.forEach { p ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch {
+                                        app.settingsRepository.update {
+                                            it.copy(defaultEngineId = p.id)
+                                        }
+                                    }
+                                    showEnginePicker = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = p.displayName,
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (p.id == settings.defaultEngineId) {
+                                Text(
+                                    text = "✓",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showEnginePicker = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    // 默认输出格式选择（HEIC/HEIF/AVIF/JXL 系统编码器未实现，标注不可用）
+    if (showFormatPicker) {
+        val supported = listOf(
+            OutputFormat.JPEG, OutputFormat.PNG, OutputFormat.WEBP
+        )
+        val unsupported = listOf(
+            OutputFormat.HEIC, OutputFormat.HEIF, OutputFormat.AVIF, OutputFormat.JXL
+        )
+        AlertDialog(
+            onDismissRequest = { showFormatPicker = false },
+            title = { Text("默认输出格式") },
+            text = {
+                Column {
+                    supported.forEach { f ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    scope.launch {
+                                        app.settingsRepository.update {
+                                            it.copy(encodeOptions = it.encodeOptions.copy(format = f))
+                                        }
+                                    }
+                                    showFormatPicker = false
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = formatDisplayName(f),
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (settings.encodeOptions.format == f) {
+                                Text("✓", color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                    unsupported.forEach { f ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "${formatDisplayName(f)}（暂不支持）",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showFormatPicker = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    // 默认质量滑块
+    if (showQualityPicker) {
+        var quality by androidx.compose.runtime.remember {
+            androidx.compose.runtime.mutableStateOf(settings.encodeOptions.quality)
+        }
+        AlertDialog(
+            onDismissRequest = { showQualityPicker = false },
+            title = { Text("默认质量：$quality") },
+            text = {
+                Column {
+                    Slider(
+                        value = quality.toFloat(),
+                        onValueChange = { quality = it.toInt() },
+                        valueRange = 1f..100f,
+                        steps = 97
+                    )
+                    Text(
+                        "100=无损/最高质量，1=最小文件",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    scope.launch {
+                        app.settingsRepository.update {
+                            it.copy(encodeOptions = it.encodeOptions.copy(quality = quality))
+                        }
+                    }
+                    showQualityPicker = false
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showQualityPicker = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // 开源许可说明
+    if (showLicenseDialog) {
+        AlertDialog(
+            onDismissRequest = { showLicenseDialog = false },
+            title = { Text("开源许可") },
+            text = {
+                Text(
+                    "ReaScale 代码：Apache-2.0\n\n" +
+                    "内置模型：\n" +
+                    "· Real-CUGAN（bilibili ailab）— MIT\n" +
+                    "· waifu2x — MIT\n" +
+                    "· ncnn 推理框架（Tencent）— BSD-3-Clause\n\n" +
+                    "模型仅用于本地离线推理。",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showLicenseDialog = false }) { Text("知道了") }
+            }
+        )
+    }
+
+    // 帮助说明
+    if (showHelpDialog) {
+        AlertDialog(
+            onDismissRequest = { showHelpDialog = false },
+            title = { Text("使用说明") },
+            text = {
+                Text(
+                    "1. 主页点击「选择图片」批量添加\n" +
+                    "2. 队列页查看处理进度，可暂停/取消\n" +
+                    "3. 引擎页管理内置与导入模型（ncnn .param+.bin）\n" +
+                    "4. 设置页调整默认引擎/格式/质量/并发\n" +
+                    "5. 输出自动保存到相册 Pictures/ReaScale/\n" +
+                    "6. 遇到问题：设置 → 调试日志，复制后发给开发者",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showHelpDialog = false }) { Text("知道了") }
+            }
+        )
     }
 }
 
@@ -596,16 +802,18 @@ private fun SettingsClickableItem(
     }
 }
 
-/** 链接型设置项 */
+/** 链接型设置项（[FIX 2026-08-17] 支持 onClick，原来是无响应死链） */
 @Composable
 private fun SettingsLinkItem(
     icon: ImageVector,
     title: String,
-    subtitle: String?
+    subtitle: String?,
+    onClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClick = onClick)
             .padding(horizontal = Spacing.md, vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -629,6 +837,34 @@ private fun SettingsLinkItem(
             text = "›",
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** 输出格式显示名 */
+private fun formatDisplayName(format: OutputFormat): String = when (format) {
+    OutputFormat.JPEG -> "JPEG"
+    OutputFormat.PNG -> "PNG"
+    OutputFormat.WEBP -> "WebP"
+    OutputFormat.HEIC -> "HEIC"
+    OutputFormat.HEIF -> "HEIF"
+    OutputFormat.AVIF -> "AVIF"
+    OutputFormat.JXL -> "JPEG XL"
+}
+
+/** 动态读取版本号（原硬编码已过时） */
+private fun versionName(context: android.content.Context): String {
+    val vn = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull() ?: "?"
+    return "v$vn"
+}
+
+/** 打开外部链接 */
+private fun openUrl(context: android.content.Context, url: String) {
+    runCatching {
+        context.startActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
         )
     }
 }
