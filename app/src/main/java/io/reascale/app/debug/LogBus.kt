@@ -122,7 +122,11 @@ object LogBus {
                     lower.contains("sigabrt") || lower.contains("jni detected") ||
                     lower.contains("jni") || lower.contains("dlopen") ||
                     lower.contains("process died") || lower.contains("was decommissioned")
-                if (mine && crash) {
+                // [FIX 2026-08-17] ReaScaleNcnn 的 C++ 诊断日志（probe-*/tile@/process）也镜像进 LogBus，
+                // 便于用户侧排查 ncnn 推理问题（探测/写回参数无法从 Kotlin 侧读取）
+                val reascaleDiag = lower.contains("probe-") || lower.contains("tile@") ||
+                    lower.contains("process:") || lower.contains("reascale")
+                if (mine && (crash || reascaleDiag)) {
                     mirroring.set(true)
                     try {
                         val clean = if (line.length > 400) line.take(400) + "…" else line

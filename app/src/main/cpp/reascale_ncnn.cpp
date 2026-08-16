@@ -37,12 +37,22 @@ struct Session {
     // [FIX 2026-08-16] 模型 blob 名（自动探测，兼容任意导入模型）
     std::string in_blob;
     std::string out_blob;
-    // [FIX 2026-08-17] 自动探测的模型内部 crop（输入像素；0=未探测到/无 crop）
-    // Real-CUGAN 等模型有结构裁剪：输出 = (输入 - crop) * scale
-    // 2x=36 / 3x=28 / 4x=38；waifu2x 等无裁剪模型 crop=0
+    // [FIX 2026-08-17 v5] 模型语义探测结果
+    // 所有 Real-CUGAN 模型均期望 0..1 域输入（官方 shader 语义）：
+    // - 2x/3x（realcugan_postproc.comp）：输出 0..1 域完整图像 → out = bottom*255
+    // - 4x（realcugan_4x_postproc.comp）：输出 0..1 域残差 → out = (in/255 + bottom)*255
+    // 判定方法（in0.5 灰输入 → 输出均值）：
+    //   完整图像模型：0.5 灰输入 → 输出 ≈ 0.5
+    //   残差模型：0.5 灰输入 → 残差 ≈ 0（灰输入残差为 0）
+    // 注意：不能靠"期望 0..255"判定——残差模型的灰输入残差≈0 会被误判（a16-a18 的教训）
+    bool is_residual = false;
+    // 自动探测的模型内部 crop（输入像素；0=未探测到/无 crop）
     int probed_crop = 0;
     // 由探测推导的 prepadding（= crop/2，仅探测到 crop 时有效）
     int probed_prepadding = 0;
+    // [FIX 2026-08-17 v2] 模型输出尺寸公式：out = in*scale - K（0 表示未探测）
+    // up4x: out = 4W-152；up2x: out = 2W-72
+    int probed_out_k = 0;
 };
 
 static std::string jstring2str(JNIEnv* env, jstring jstr) {
@@ -66,25 +76,21 @@ static jlong session_new(JNIEnv* env, jobject thiz, jint gpuid, jint threads, jb
     return reinterpret_cast<jlong>(s);
 }
 
-// [FIX 2026-08-17] 自动探测模型内部 crop 与正确 prepadding
+// [FIX 2026-08-17 v2] 自动探测：输出尺寸公式 + 输入域对照实验
 //
-// 旧实现（单尺寸 + round 反推 scale）的 bug：
-//   4x Real-CUGAN 输入 128 → 输出 (128-38)*4 = 360，360/128 = 2.81 被 round 成 3，
-//   crop 算成 128-360/3 = 8 → prepadding = 4（真实应为 19）
-//   → 每 tile 输出比预期少 120px，写回左上角 → 黑条 + 内容错位 + 彩色边缘（用户实测 4x 全黑+彩线）
-//   2x/3x 因 round 得 scale 偏小、crop 为负、pad=0 走兜底值（18/14=真实 crop/2）而碰巧正常
-//
-// 新实现（双尺寸差分，不依赖 round）：
-//   模型输出 = (输入 - crop) * scale，crop 与输入尺寸无关（结构裁剪，恒定）
-//   o1 = (T1 - crop)*scale，o2 = (T2 - crop)*scale
-//   → scale = (o2-o1)/(T2-T1)（精确），crop = T1 - o1/scale
-//   探测到 crop>0：prepadding = crop/2，tile 输出精确 = tile*scale，写回左上角
-//   探测到 crop=0（waifu2x 等无裁剪模型）：prepadding 用兜底扩边，写回取中间区域
+// 1) 尺寸公式（双尺寸差分，不依赖 round）：
+//    模型输出 = (输入 - crop) * scale 或 = 输入*scale - K（左对齐，见 up4x param 实测）
+//    o1 = f(T1), o2 = f(T2) → scale = (o2-o1)/(T2-T1) 精确；K = T1*scale - o1
+//    up4x-conservative 实测: 128→500, 192→756 → scale=4, K=12 → out = 4W-12
+// 2) 输入域对照实验（全黑根因排查）：
+//    0..1 域灰 0.5 与 0..255 域灰 127.5 分别推理，统计输出均值：
+//    - 模型期望 0..1  → 0.5 输入输出≈0.5，127.5 输入输出≈大数
+//    - 模型期望 0..255 → 0.5 输入输出≈0.002（我们现在的输入 → 全黑！），127.5 输出≈0.5
 static void session_probe_crop(Session* s) {
     const int T1 = 128;  // 4 的倍数，兼容常见对齐要求
     const int T2 = 192;
     ncnn::Mat in1(T1, T1, 3);
-    in1.fill(0.5f);  // 0.5/1 域中性灰
+    in1.fill(0.5f);  // 0..1 域中性灰
     ncnn::Mat in2(T2, T2, 3);
     in2.fill(0.5f);
     ncnn::Mat out1, out2;
@@ -103,23 +109,69 @@ static void session_probe_crop(Session* s) {
         if (ex.extract(outb, out2) != 0) return;
     }
     if (out1.empty() || out2.empty() || out1.w <= 0 || out2.w <= 0) return;
-    if (out1.h != out1.w || out2.h != out2.w) return;  // 非方形输出，放弃探测
 
+    // === 模型语义探测（残差 vs 完整图像）===
+    // [FIX v5] 用 in0.5 灰输入的输出均值判定：
+    //   完整图像模型（2x/3x）：0.5 灰 → 输出 ≈ 0.5
+    //   残差模型（4x）：0.5 灰 → 残差 ≈ 0（灰输入残差为 0）
+    // 旧 v2 逻辑（in127.5 输出 vs in0.5 输出）对残差模型误判为"期望 0..255 输入" → 输入域错误 → 条纹噪点
+    {
+        ncnn::Mat in255(T1, T1, 3);
+        in255.fill(127.5f);  // 0..255 域中性灰（对照）
+        ncnn::Mat out255;
+        ncnn::Extractor ex = s->net.create_extractor();
+        const char* inb = s->in_blob.empty() ? "in0" : s->in_blob.c_str();
+        const char* outb = s->out_blob.empty() ? "out0" : s->out_blob.c_str();
+        if (ex.input(inb, in255) == 0 && ex.extract(outb, out255) == 0 && !out255.empty()) {
+            auto stat = [](const ncnn::Mat& m, float& avg, float& maxv) {
+                double sum = 0; float mx = 0; long long cnt = 0;
+                const int chans = std::min(m.c, 3);
+                for (int c = 0; c < chans; c++) {
+                    const float* p = m.channel(c);
+                    const long long n = (long long)m.w * m.h;
+                    for (long long i = 0; i < n; i++) {
+                        float v = p[i] < 0 ? -p[i] : p[i];
+                        sum += v; if (v > mx) mx = v;
+                    }
+                    cnt += n;
+                }
+                avg = cnt ? (float)(sum / cnt) : 0.f;
+                maxv = mx;
+            };
+            float a1 = 0, m1 = 0, a255 = 0, m255 = 0;
+            stat(out1, a1, m1);
+            stat(out255, a255, m255);
+            // 残差判定：0.5 灰输入的输出均值 ≈ 0（残差）vs ≈ 0.5（完整图像）
+            const bool residual = (a1 < 0.05f);
+            s->is_residual = residual;
+            __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn",
+                "probe-semantic: in0.5→avg|v|=%.5f max=%.5f | in127.5→avg|v|=%.4f max=%.4f | 模型=%s",
+                a1, m1, a255, m255, residual ? "残差(输出=输入+残差)" : "完整图像(输出=模型输出)");
+        }
+    }
+
+    // === 尺寸公式探测 ===
     const double scale_est = (double)(out2.w - out1.w) / (double)(T2 - T1);
     if (scale_est < 1.0 || scale_est > 16.0) {
         __android_log_print(ANDROID_LOG_WARN, "ReaScaleNcnn",
             "探测失败: 差分 scale=%.2f 不合理，放弃自动 prepadding", scale_est);
         return;
     }
-    double crop_d = T1 - (double)out1.w / scale_est;
+    // K = T1*scale - o1（模型输出 = 输入*scale - K，左对齐）
+    double k_d = T1 * scale_est - out1.w;
+    int k_i = (int)std::lround(k_d);
+    if (k_i < 0) k_i = 0;
+    s->probed_out_k = k_i;
+    // crop 语义（对称裁剪模型）：crop = K/scale
+    double crop_d = k_d / scale_est;
     int crop_i = (int)std::lround(crop_d);
     if (crop_i < 0) crop_i = 0;
     s->probed_crop = crop_i;
     s->probed_prepadding = crop_i / 2;
     __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn",
-        "探测: %dx%d→%dx%d, %dx%d→%dx%d, scale≈%.2f, crop≈%dpx, prepadding=%d (当前=%d)",
+        "probe-size: %dx%d→%dx%d, %dx%d→%dx%d, scale≈%.2f, out=in*scale-%d, crop≈%dpx, prepadding=%d",
         T1, T1, out1.w, out1.h, T2, T2, out2.w, out2.h,
-        scale_est, crop_i, s->probed_prepadding, s->prepadding);
+        scale_est, k_i, crop_i, s->probed_prepadding);
 }
 
 static jboolean session_load_assets(
@@ -242,12 +294,13 @@ static bool process_tile(
     const int rh = tile_h + 2 * p;
 
     // 从原图取扩边 ROI → float32 RGB [0,1]
+    // [FIX v5] 所有 Real-CUGAN 模型期望 0..1 输入（官方 shader 语义确认）
     // 越界部分填 0（后续用镜像/复制补边界）
     ncnn::Mat tile_f32(rw, rh, 3);
     if (tile_f32.empty()) return false;
     tile_f32.fill(0.f);
+    const float in_scale = 1.f / 255.f;
     {
-        const float inv255 = 1.f / 255.f;
         for (int yy = 0; yy < rh; yy++) {
             const int sy = ry0 + yy;
             if (sy < 0 || sy >= src_h) continue; // 边界外留 0，后面镜像
@@ -258,9 +311,9 @@ static bool process_tile(
             for (int xx = 0; xx < rw; xx++) {
                 const int sx = rx0 + xx;
                 if (sx < 0 || sx >= src_w) continue; // 边界外留 0
-                rrow[xx] = (float)srow[sx * 4 + 2] * inv255; // R
-                grow[xx] = (float)srow[sx * 4 + 1] * inv255; // G
-                brow[xx] = (float)srow[sx * 4 + 0] * inv255; // B
+                rrow[xx] = (float)srow[sx * 4 + 2] * in_scale; // R
+                grow[xx] = (float)srow[sx * 4 + 1] * in_scale; // G
+                brow[xx] = (float)srow[sx * 4 + 0] * in_scale; // B
             }
         }
     }
@@ -284,9 +337,9 @@ static bool process_tile(
                 if (mx >= src_w) mx = 2 * src_w - mx - 1;
                 mx = std::min(std::max(mx, 0), src_w - 1);
                 const unsigned char* srow = in_pixels + (size_t)sy * src_stride;
-                tile_f32.channel(0).row(yy)[xx] = (float)srow[mx * 4 + 2] * (1.f/255.f);
-                tile_f32.channel(1).row(yy)[xx] = (float)srow[mx * 4 + 1] * (1.f/255.f);
-                tile_f32.channel(2).row(yy)[xx] = (float)srow[mx * 4 + 0] * (1.f/255.f);
+                tile_f32.channel(0).row(yy)[xx] = (float)srow[mx * 4 + 2] * in_scale;
+                tile_f32.channel(1).row(yy)[xx] = (float)srow[mx * 4 + 1] * in_scale;
+                tile_f32.channel(2).row(yy)[xx] = (float)srow[mx * 4 + 0] * in_scale;
             }
         }
         // 上/下越界行镜像（整行复制）
@@ -301,9 +354,9 @@ static bool process_tile(
             for (int xx = 0; xx < rw; xx++) {
                 const int sx = rx0 + xx;
                 const int msx = (sx >= 0 && sx < src_w) ? sx : std::min(std::max((sx < 0 ? -sx - 1 : 2 * src_w - sx - 1), 0), src_w - 1);
-                tile_f32.channel(0).row(yy)[xx] = (float)srow[msx * 4 + 2] * (1.f/255.f);
-                tile_f32.channel(1).row(yy)[xx] = (float)srow[msx * 4 + 1] * (1.f/255.f);
-                tile_f32.channel(2).row(yy)[xx] = (float)srow[msx * 4 + 0] * (1.f/255.f);
+                tile_f32.channel(0).row(yy)[xx] = (float)srow[msx * 4 + 2] * in_scale;
+                tile_f32.channel(1).row(yy)[xx] = (float)srow[msx * 4 + 1] * in_scale;
+                tile_f32.channel(2).row(yy)[xx] = (float)srow[msx * 4 + 0] * in_scale;
             }
         }
     }
@@ -330,15 +383,19 @@ static bool process_tile(
         "tile@(%d,%d) roi=%dx%d pad=%d → out=%dx%dx%d",
         nx0, ny0, rw, rh, p, tile_out.w, tile_out.h, tile_out.c);
 
-    // 输出写回：[FIX 2026-08-17] 按模型 crop 动态取源区域，兼容两类模型
+    // 输出写回：[FIX 2026-08-17 v5] 左对齐取左上角 + 残差模型加回输入
     //
-    // 模型输出 = (输入 - crop) * scale，crop 对称分布在两侧（结构裁剪，恒定）
-    // 输入 [nx0, nx0+tile_w) 扩边后位于 [p, p+tile_w)
-    // → 输出中对应区域 = [(p - crop/2)*scale, (p - crop/2 + tile_w)*scale)
-    //
-    // 有 crop 模型（Real-CUGAN，探测 pad = crop/2）：src_off = 0 → 取左上角（旧逻辑）
-    // 无 crop 模型（waifu2x 等导入模型，探测 crop=0，pad 为兜底扩边）：
-    //   src_off = pad*scale → 取中间区域，避免旧逻辑"取左上角"导致的错位
+    // 官方 realcugan-ncnn-vulkan postproc shader 语义（GitHub 源码确认）：
+    // - 2x/3x（realcugan_postproc.comp）：模型输出为 0..1 域完整图像
+    //     out = clamp(bottom * 255)
+    // - 4x（realcugan_4x_postproc.comp）：模型输出为 0..1 域残差
+    //     imx = gx/scale + crop_x（输出 gx 对应原图 imx，左对齐）
+    //     out = clamp((in[imx]/255 + bottom[gx]) * 255)
+    // - 写回：模型输出 [0, tile*scale) 直接对应 tile 无 pad 区域（取左上角），
+    //   pad 必须 = crop/2（探测保证）：tile 输出 = (T+2p-crop)*scale = T*scale 精确
+    // 历史：v1 src_off=0 但探测错(crop=3)；v2 src_off=p*scale 错位；
+    //       v3 改回 src_off=0 ✓；v4 输入域判定错误(0..255)+残差加回 → 条纹噪点；
+    //       v5 统一 0..1 输入 + 残差按 probe-semantic 判定
     const int crop_half = s->probed_crop / 2;
     const int src_off_x = (p - crop_half) * sc;
     const int src_off_y = (p - crop_half) * sc;
@@ -348,22 +405,44 @@ static bool process_tile(
     const int dy0 = ny0 * sc;
     const int copy_w = std::min(out_w, std::max(0, tile_out.w - src_off_x));
     const int copy_h = std::min(out_h, std::max(0, tile_out.h - src_off_y));
+    // 残差模型（4x）：输出 = (输入 + 残差) * 255；完整图像模型（2x/3x）：输出 = 模型输出 * 255
+    const bool is_residual = s->is_residual;
 
     for (int yy = 0; yy < copy_h; yy++) {
         const int dy = dy0 + yy;
         const int sy = yy + src_off_y;
         if (sy < 0 || sy >= tile_out.h) continue;
+        // 输出行 gy → 输入行 gy/scale + p（shader 整数除法语义）
+        const int in_ty = yy / sc + p;
+        if (in_ty < 0 || in_ty >= rh) continue;
         const float* rrow = tile_out.channel(0).row(sy);
         const float* grow = tile_out.channel(1).row(sy);
         const float* brow = tile_out.channel(2).row(sy);
         unsigned char* drow = out_pixels + (size_t)dy * out_stride;
+        const float* in_r = is_residual ? tile_f32.channel(0).row(in_ty) : nullptr;
+        const float* in_g = is_residual ? tile_f32.channel(1).row(in_ty) : nullptr;
+        const float* in_b = is_residual ? tile_f32.channel(2).row(in_ty) : nullptr;
         for (int xx = 0; xx < copy_w; xx++) {
             const int dx = dx0 + xx;
             const int sx = xx + src_off_x;
             if (sx < 0 || sx >= tile_out.w) continue;
-            drow[dx * 4 + 0] = (unsigned char)std::min(std::max((int)std::round(brow[sx] * 255.f), 0), 255);
-            drow[dx * 4 + 1] = (unsigned char)std::min(std::max((int)std::round(grow[sx] * 255.f), 0), 255);
-            drow[dx * 4 + 2] = (unsigned char)std::min(std::max((int)std::round(rrow[sx] * 255.f), 0), 255);
+            // 输出列 gx → 输入列 gx/scale + p
+            const int in_tx = xx / sc + p;
+            if (in_tx < 0 || in_tx >= rw) continue;
+            float r, g, b;
+            if (is_residual) {
+                // 官方 shader：(in/255 + bottom) * 255，in 为 0..1 域 tile_f32
+                r = (in_r[in_tx] + rrow[sx]) * 255.f;
+                g = (in_g[in_tx] + grow[sx]) * 255.f;
+                b = (in_b[in_tx] + brow[sx]) * 255.f;
+            } else {
+                r = rrow[sx] * 255.f;
+                g = grow[sx] * 255.f;
+                b = brow[sx] * 255.f;
+            }
+            drow[dx * 4 + 0] = (unsigned char)std::min(std::max((int)std::round(b), 0), 255);
+            drow[dx * 4 + 1] = (unsigned char)std::min(std::max((int)std::round(g), 0), 255);
+            drow[dx * 4 + 2] = (unsigned char)std::min(std::max((int)std::round(r), 0), 255);
             drow[dx * 4 + 3] = 255;
         }
     }
@@ -381,18 +460,18 @@ static jboolean session_process(
     if (!s) return JNI_FALSE;
     if (scale > 0) s->scale = scale;
     if (tile_size >= 32) s->tile_size = tile_size;
-    // [FIX 2026-08-17] prepadding 选择：
-    // 1. 探测到模型 crop > 0 → prepadding = crop/2（tile 输出精确 = tile*scale，写回左上角）
-    // 2. 否则（无 crop 模型或探测失败）→ 用 Kotlin 传入值或经验兜底扩边，
-    //    写回时按 (pad - crop/2)*scale 偏移取中间区域（见 process_tile）
-    if (s->probed_prepadding > 0) {
-        s->prepadding = s->probed_prepadding;
-    } else if (prepadding > 0) {
-        s->prepadding = prepadding;
-    }
-    // prepadding 兜底：2x=18, 3x=14, 4x=19（Real-CUGAN 官方值，对无 crop 模型仅作扩边）
-    if (s->prepadding <= 0) {
-        s->prepadding = (s->scale == 2) ? 18 : (s->scale == 3) ? 14 : (s->scale == 4) ? 19 : 18;
+    // [FIX 2026-08-17 v2] prepadding 选择（写回统一取中间区域，见 process_tile）：
+    //   p = max(官方经验值, 探测值, Kotlin 传入值, 3)
+    // - 官方经验值：Real-CUGAN 2x=18/3x=14/4x=19（nihui realcugan-ncnn-vulkan）
+    // - 探测值：对导入模型推导（4W-12 类模型探测出 pad=1，被下限 3 与官方值抬升）
+    // - 下限 3：写回覆盖需要 p*scale ≥ K（K=12 → p≥3），且 pad 大只增加重叠不破坏正确性
+    {
+        int default_pad = (s->scale == 2) ? 18 : (s->scale == 3) ? 14 : (s->scale == 4) ? 19 : 18;
+        int p = default_pad;
+        if (s->probed_prepadding > 0) p = std::max(p, s->probed_prepadding);
+        if (prepadding > 0) p = std::max(p, prepadding);
+        p = std::max(p, 3);
+        s->prepadding = p;
     }
     const int sc = s->scale;
     const int p = s->prepadding;
@@ -426,8 +505,8 @@ static jboolean session_process(
     const int ytiles = (h + tile_nopad - 1) / tile_nopad;
 
     __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn",
-        "process: in=%dx%d scale=%d tile=%d pad=%d tiles=%dx%d",
-        w, h, sc, tile_nopad, p, xtiles, ytiles);
+        "process: in=%dx%d scale=%d tile=%d pad=%d tiles=%dx%d residual=%d probed_crop=%d",
+        w, h, sc, tile_nopad, p, xtiles, ytiles, s->is_residual ? 1 : 0, s->probed_crop);
 
     bool ok = true;
     for (int yi = 0; yi < ytiles && ok; yi++) {
