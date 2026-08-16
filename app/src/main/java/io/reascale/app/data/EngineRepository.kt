@@ -250,31 +250,38 @@ class EngineRepository(private val context: Context) {
      *   导入 ONNX 会产生无法运行的 profile，必须显式拒绝
      *
      * @param src 待复制的源文件（通常来自 SAF 复制到 cacheDir/imports/）
+     * @param binOverride [FIX 2026-08-17] 用户多选时提供的 .bin 文件（可为 null，
+     *        此时尝试找 src 同目录同名 .bin）。复制时统一改名为 param 同名，
+     *        解决"选了 .bin 提示不支持"的问题
      * @param userDisplayName 用户指定的显示名（默认用文件名）
      */
     suspend fun importOnnx(
         src: File,
+        binOverride: File? = null,
         userDisplayName: String? = null
     ): EngineProfile = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (!src.name.endsWith(".param", ignoreCase = true)) {
                 throw IllegalStateException(
-                    "不支持的模型格式（${src.name}）：ONNX 推理已停用，请导入 ncnn 模型（.param 文件，需与同名 .bin 在同一目录）"
+                    "不支持的模型格式（${src.name}）：ONNX 推理已停用，请导入 ncnn 模型（.param 文件，需与同名 .bin 成对选择）"
                 )
             }
-            // 1. 生成新 ID + 复制 .param 与同名 .bin 到 models/<id>/ 目录
+            // 1. 生成新 ID + 复制 .param 与 .bin 到 models/<id>/ 目录
             val id = "user_${System.currentTimeMillis()}"
             val modelDir2 = File(modelsDir, id).apply { mkdirs() }
             val dst = File(modelDir2, src.name)
             src.copyTo(dst, overwrite = true)
-            val srcBin = File(src.parentFile, src.name.replace(".param", ".bin"))
+            // bin 来源：优先多选提供的 .bin，否则找 src 同目录同名 .bin
+            val srcBin = binOverride?.takeIf { it.exists() && it.name.endsWith(".bin", ignoreCase = true) }
+                ?: File(src.parentFile, src.name.replace(".param", ".bin"))
             if (!srcBin.exists()) {
                 dst.delete()
                 throw IllegalStateException(
                     "缺少模型权重文件：${srcBin.name}（.param 需与同名 .bin 成对选择）"
                 )
             }
-            srcBin.copyTo(File(modelDir2, srcBin.name), overwrite = true)
+            // 复制为 param 同名，保证 C++ 端 param→bin 路径推导一致
+            srcBin.copyTo(File(modelDir2, dst.name.replace(".param", ".bin")), overwrite = true)
 
             // 2. Auto-Probe：读文件大小 + 文件名启发式推断
             val sizeBytes = dst.length()

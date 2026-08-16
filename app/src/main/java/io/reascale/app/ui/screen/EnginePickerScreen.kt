@@ -120,35 +120,45 @@ fun EnginePickerScreen(
     val builtin = filtered.filter { it.source == EngineSource.BUILTIN }
     val user = filtered.filter { it.source == EngineSource.USER }
 
-    // SAF launcher：选 ncnn 模型（.param，需与同名 .bin 同目录）
+    // SAF launcher：多选导入 ncnn 模型（.param + .bin 一起选，可单选 .param）
+    // [FIX 2026-08-17] 原单选 OpenDocument 只接受 .param：用户选 .bin 就被拒（"不支持格式"）。
+    // 现支持多选：识别 .param（结构）与 .bin（权重），两者都选或只选 .param 均可导入；
+    // 只选 .bin 时给出明确指引而不是笼统报错。
     val modelPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
         scope.launch {
-            var tmp: File? = null
+            var tmpFiles: List<File> = emptyList()
             try {
-                // 1. SAF Uri → cacheDir/imports/<name>
-                tmp = withContext(Dispatchers.IO) {
-                    copySafToCache(context, uri)
+                // 1. 全部 SAF Uri → cacheDir/imports/
+                tmpFiles = uris.mapNotNull { uri ->
+                    withContext(Dispatchers.IO) { copySafToCache(context, uri) }
                 }
-                if (tmp == null) {
+                if (tmpFiles.isEmpty()) {
                     snackbarHostState.showSnackbar("读取文件失败")
                     return@launch
                 }
-                // [FIX] ONNX 已停用：导入前先校验扩展名，避免导入后无法运行
-                if (!tmp!!.name.endsWith(".param", ignoreCase = true)) {
-                    snackbarHostState.showSnackbar("不支持的格式：请选择 ncnn 模型（.param，与同名 .bin 同目录）")
+                val paramFile = tmpFiles.firstOrNull { it.name.endsWith(".param", ignoreCase = true) }
+                val binFile = tmpFiles.firstOrNull { it.name.endsWith(".bin", ignoreCase = true) }
+                if (paramFile == null) {
+                    // 只有 .bin（或无法识别）：给出明确指引，不再笼统报"不支持"
+                    val msg = if (binFile != null) {
+                        "已选择 .bin 权重文件，还需要 .param 结构文件——请同时选中两者（可多选）"
+                    } else {
+                        "未识别到 .param 模型文件（ncnn 模型 = .param 结构 + .bin 权重，需成对）"
+                    }
+                    snackbarHostState.showSnackbar(msg)
                     return@launch
                 }
-                // 2. 调 importOnnx 触发 Auto-Probe + 持久化（内部校验 .bin 存在）
-                val profile = app.engineRepository.importOnnx(tmp!!)
+                // 2. 导入（多选时把 .bin 一并交给 importOnnx，自动改名为 param 同名）
+                val profile = app.engineRepository.importOnnx(paramFile, binOverride = binFile)
                 snackbarHostState.showSnackbar("已导入：${profile.displayName}")
             } catch (t: Throwable) {
                 snackbarHostState.showSnackbar("导入失败：${t.message ?: "未知错误"}")
             } finally {
                 // [FIX] 无论成功/失败都清理 cache 临时文件，避免残留累积
-                if (tmp != null && tmp!!.exists()) tmp!!.delete()
+                tmpFiles.forEach { runCatching { if (it.exists()) it.delete() } }
             }
         }
     }
@@ -321,13 +331,17 @@ fun EnginePickerScreen(
 
 /**
  * 复制 SAF Uri → cacheDir/imports/<name>
- * [FIX] 追加时间戳后缀避免同名文件互相覆盖
+ * [FIX 2026-08-17] 追加时间戳后缀避免同名文件互相覆盖；
+ * 文件名解析健壮化：DISPLAY_NAME 查询失败时解码 lastPathSegment
+ * （content://.../document/primary:Download/model.param 之类），而不是直接拼原始段
  */
 private fun copySafToCache(context: Context, uri: Uri): File? {
     val name = context.contentResolver.query(uri, null, null, null, null)?.use { c ->
         if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME))
         else null
-    } ?: uri.lastPathSegment ?: "imported.param"
+    }?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.let {
+        android.net.Uri.decode(it)?.substringAfterLast('/')?.substringAfterLast(':')
+    }?.takeIf { it.isNotBlank() } ?: "imported.param"
     val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
     val dest = File(context.cacheDir, "imports/${System.currentTimeMillis()}_$safeName").apply {
         parentFile?.mkdirs()
