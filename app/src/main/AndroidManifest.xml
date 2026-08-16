@@ -2,6 +2,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- [FIX 2026-08-17] heifwriter 库 minSdk=28，项目 minSdk=26：
+         允许合并，运行时仅在 API 28+/30+ 调用 HeifWriter/AvifWriter（MediaStoreWriter.isFormatSupported 已检查） -->
+    <uses-sdk tools:overrideLibrary="androidx.heifwriter" />
+
     <!-- 图像读取（M0 只读相册，M7 才需要完整权限） -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"

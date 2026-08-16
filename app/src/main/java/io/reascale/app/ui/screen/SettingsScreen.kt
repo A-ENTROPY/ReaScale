@@ -363,12 +363,10 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
         )
     }
 
-    // 默认输出格式选择（HEIC/HEIF/AVIF/JXL 系统编码器未实现，标注不可用）
+    // 默认输出格式选择（[FIX 2026-08-17] 按设备能力动态标注 HEIC/AVIF 等次世代格式）
     if (showFormatPicker) {
-        val supported = listOf(
-            OutputFormat.JPEG, OutputFormat.PNG, OutputFormat.WEBP
-        )
-        val unsupported = listOf(
+        val allFormats = listOf(
+            OutputFormat.JPEG, OutputFormat.PNG, OutputFormat.WEBP,
             OutputFormat.HEIC, OutputFormat.HEIF, OutputFormat.AVIF, OutputFormat.JXL
         )
         AlertDialog(
@@ -376,44 +374,40 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
             title = { Text("默认输出格式") },
             text = {
                 Column {
-                    supported.forEach { f ->
+                    allFormats.forEach { f ->
+                        val ok = io.reascale.app.core.processing.MediaStoreWriter.isFormatSupported(f)
+                        val note = when {
+                            ok -> ""
+                            f == OutputFormat.JXL -> "（开发中）"
+                            f == OutputFormat.AVIF -> "（需 Android 11+ 且设备支持 AV1）"
+                            else -> "（需 Android 9+）"
+                        }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        app.settingsRepository.update {
-                                            it.copy(encodeOptions = it.encodeOptions.copy(format = f))
+                                .then(
+                                    if (ok) Modifier.clickable {
+                                        scope.launch {
+                                            app.settingsRepository.update {
+                                                it.copy(encodeOptions = it.encodeOptions.copy(format = f))
+                                            }
                                         }
-                                    }
-                                    showFormatPicker = false
-                                }
+                                        showFormatPicker = false
+                                    } else Modifier
+                                )
                                 .padding(vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = formatDisplayName(f),
+                                text = formatDisplayName(f) + note,
                                 style = MaterialTheme.typography.bodyLarge,
+                                color = if (ok) MaterialTheme.colorScheme.onSurface
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f)
                             )
                             if (settings.encodeOptions.format == f) {
                                 Text("✓", color = MaterialTheme.colorScheme.primary)
                             }
-                        }
-                    }
-                    unsupported.forEach { f ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "${formatDisplayName(f)}（暂不支持）",
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.weight(1f)
-                            )
                         }
                     }
                 }

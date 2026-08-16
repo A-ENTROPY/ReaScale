@@ -17,8 +17,8 @@ android {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.3.1-a23"
+        versionCode = 13
+        versionName = "0.3.1-a24"
         vectorDrawables { useSupportLibrary = true }
 
         ndk {
@@ -120,6 +120,8 @@ dependencies {
     // M2 图片 I/O：ExifInterface、DocumentFile
     implementation("androidx.exifinterface:exifinterface:1.3.7")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // [FIX 2026-08-17] 次世代格式编码：AvifWriter（HEIC 用平台 HeifWriter，API 28+）
+    implementation("androidx.heifwriter:heifwriter:1.1.0")
 
     // M7 队列（占位声明，M7 阶段才启用 Worker）
     implementation("androidx.work:work-runtime-ktx:2.9.1")
