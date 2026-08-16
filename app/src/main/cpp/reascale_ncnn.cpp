@@ -288,75 +288,42 @@ static bool process_tile(
     if (tile_w <= 0 || tile_h <= 0) return true;
 
     // 扩边 ROI（真实重叠像素）：[nx0-p, nx0+tile_w+p)
+    // [FIX v6] 3x 模型对齐修复：scale==1/3 时输入必须对齐 4 的倍数，scale==2/4 对齐 2
+    // 依据官方 realcugan.cpp：prepadding_bottom += (tile+3)/4*4 - tile（scale 1/3）
+    // 3x 模型内部含 stride-2 层，非 4 倍数输入（如 tile 90 → ROI 118）输出尺寸偏差，
+    // 导致右/下边缘模糊（"没放大就拼合"）。2x/4x 仅需对齐 2，通常天然满足。
     const int rx0 = nx0 - p;
     const int ry0 = ny0 - p;
-    const int rw = tile_w + 2 * p;
-    const int rh = tile_h + 2 * p;
+    const int rw_raw = tile_w + 2 * p;
+    const int rh_raw = tile_h + 2 * p;
+    const int align = (sc == 1 || sc == 3) ? 4 : 2;
+    const int rw = ((rw_raw + align - 1) / align) * align;
+    const int rh = ((rh_raw + align - 1) / align) * align;
 
     // 从原图取扩边 ROI → float32 RGB [0,1]
     // [FIX v5] 所有 Real-CUGAN 模型期望 0..1 输入（官方 shader 语义确认）
-    // 越界部分填 0（后续用镜像/复制补边界）
+    // [FIX v6] REPLICATE 填充（官方 preproc shader 用 clamp）：越界行/列取最近有效像素；
+    //   对齐扩展区（末尾多出的 <align 行/列）复制最后一行/列
     ncnn::Mat tile_f32(rw, rh, 3);
     if (tile_f32.empty()) return false;
     tile_f32.fill(0.f);
     const float in_scale = 1.f / 255.f;
     {
         for (int yy = 0; yy < rh; yy++) {
-            const int sy = ry0 + yy;
-            if (sy < 0 || sy >= src_h) continue; // 边界外留 0，后面镜像
+            int sy = ry0 + yy;
+            if (yy >= rh_raw) sy = ry0 + rh_raw - 1;  // 对齐扩展行：复制最后有效行
+            sy = std::min(std::max(sy, 0), src_h - 1); // REPLICATE
             const unsigned char* srow = in_pixels + (size_t)sy * src_stride;
             float* rrow = tile_f32.channel(0).row(yy);
             float* grow = tile_f32.channel(1).row(yy);
             float* brow = tile_f32.channel(2).row(yy);
             for (int xx = 0; xx < rw; xx++) {
-                const int sx = rx0 + xx;
-                if (sx < 0 || sx >= src_w) continue; // 边界外留 0
+                int sx = rx0 + xx;
+                if (xx >= rw_raw) sx = rx0 + rw_raw - 1;  // 对齐扩展列：复制最后有效列
+                sx = std::min(std::max(sx, 0), src_w - 1); // REPLICATE
                 rrow[xx] = (float)srow[sx * 4 + 2] * in_scale; // R
                 grow[xx] = (float)srow[sx * 4 + 1] * in_scale; // G
                 brow[xx] = (float)srow[sx * 4 + 0] * in_scale; // B
-            }
-        }
-    }
-
-    // 边界外镜像 pad（BORDER_REFLECT 填充越界行/列）
-    // 注意：ncnn copy_make_border 对内部 tile（无越界）不做任何事（0 pad 因 ROI 已扩边）
-    // 这里 tile_f32 已含真实重叠区域，只需对越界边缘做镜像
-    // 用 copy_make_border 的 REFLECT 处理：把越界 0 区域替换为镜像
-    // 简便：对每个越界行/列手动镜像（REFLECT_101 语义：边缘像素回折）
-    {
-        // 左/右越界列镜像（x < 0 或 x >= src_w）
-        for (int yy = 0; yy < rh; yy++) {
-            const int sy = ry0 + yy;
-            if (sy < 0 || sy >= src_h) continue;
-            for (int xx = 0; xx < rw; xx++) {
-                const int sx = rx0 + xx;
-                if (sx >= 0 && sx < src_w) continue;
-                // 镜像坐标
-                int mx = sx;
-                if (mx < 0) mx = -mx - 1;          // REFLECT_101: -1 → 0
-                if (mx >= src_w) mx = 2 * src_w - mx - 1;
-                mx = std::min(std::max(mx, 0), src_w - 1);
-                const unsigned char* srow = in_pixels + (size_t)sy * src_stride;
-                tile_f32.channel(0).row(yy)[xx] = (float)srow[mx * 4 + 2] * in_scale;
-                tile_f32.channel(1).row(yy)[xx] = (float)srow[mx * 4 + 1] * in_scale;
-                tile_f32.channel(2).row(yy)[xx] = (float)srow[mx * 4 + 0] * in_scale;
-            }
-        }
-        // 上/下越界行镜像（整行复制）
-        for (int yy = 0; yy < rh; yy++) {
-            const int sy = ry0 + yy;
-            if (sy >= 0 && sy < src_h) continue;
-            int my = sy;
-            if (my < 0) my = -my - 1;
-            if (my >= src_h) my = 2 * src_h - my - 1;
-            my = std::min(std::max(my, 0), src_h - 1);
-            const unsigned char* srow = in_pixels + (size_t)my * src_stride;
-            for (int xx = 0; xx < rw; xx++) {
-                const int sx = rx0 + xx;
-                const int msx = (sx >= 0 && sx < src_w) ? sx : std::min(std::max((sx < 0 ? -sx - 1 : 2 * src_w - sx - 1), 0), src_w - 1);
-                tile_f32.channel(0).row(yy)[xx] = (float)srow[msx * 4 + 2] * in_scale;
-                tile_f32.channel(1).row(yy)[xx] = (float)srow[msx * 4 + 1] * in_scale;
-                tile_f32.channel(2).row(yy)[xx] = (float)srow[msx * 4 + 0] * in_scale;
             }
         }
     }
