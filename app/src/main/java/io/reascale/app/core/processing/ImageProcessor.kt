@@ -31,7 +31,9 @@ import io.reascale.app.debug.LogBus
  */
 class ImageProcessor(
     private val context: Context,
-    private val engineProvider: (String) -> UpscaleEngine
+    private val engineProvider: (String) -> UpscaleEngine,
+    // [FIX 2026-08-17] 用户选择的输出目录（SAF tree uri，设置页配置；空=默认相册）
+    private val outputDirProvider: suspend () -> String = { "" }
 ) {
     // [FIX 2026-08-11] 引擎缓存：复用 NcnnEngine 实例避免反复加载模型
     // 同时防止多个引擎实例并发推理导致 ncnn 内部死锁
@@ -153,13 +155,14 @@ class ImageProcessor(
         }
         progress(0.92f)
 
-        // 6. 编码 + 写盘
+        // 6. 编码 + 写盘（[FIX 2026-08-17] 支持设置页配置的输出目录）
         val outUri = try {
             MediaStoreWriter.write(
                 context = context,
                 bitmap = outBitmap,
                 options = job.encodeOptions,
-                displayName = "${baseNameEarly}_${profile.capabilities.baseScale}x"
+                displayName = "${baseNameEarly}_${profile.capabilities.baseScale}x",
+                outputDirUri = outputDirProvider()
             )
         } catch (t: Throwable) {
             throw IllegalStateException("输出失败: ${t.message}", t)

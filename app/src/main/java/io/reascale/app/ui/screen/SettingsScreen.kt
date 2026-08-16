@@ -1,7 +1,11 @@
 package io.reascale.app.ui.screen
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Brightness4
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.ColorLens
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Help
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Palette
@@ -87,11 +92,29 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
         initialValue = AppSettings()
     )
     // [FIX 2026-08-17] 设置对话框状态（默认引擎/格式/质量/许可/帮助）
-    var showEnginePicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var showFormatPicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var showQualityPicker by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var showLicenseDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-    var showHelpDialog by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var showEnginePicker by remember { mutableStateOf(false) }
+    var showFormatPicker by remember { mutableStateOf(false) }
+    var showQualityPicker by remember { mutableStateOf(false) }
+    var showLicenseDialog by remember { mutableStateOf(false) }
+    var showHelpDialog by remember { mutableStateOf(false) }
+
+    // [FIX 2026-08-17] SAF 输出目录选择器（OpenDocumentTree）
+    val dirPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
+            scope.launch {
+                app.settingsRepository.update { it.copy(outputDirUri = uri.toString()) }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -190,6 +213,23 @@ fun SettingsScreen(onOpenDebugLog: () -> Unit = {}) {
                     title = stringResource(R.string.settings_default_quality),
                     subtitle = "质量 ${settings.encodeOptions.quality}（1-100）",
                     onClick = { showQualityPicker = true }
+                )
+                SettingsDivider()
+                // [FIX 2026-08-17] 输出目录：SAF 目录选择（原来只有字段没有 UI/实现）
+                SettingsClickableItem(
+                    icon = Icons.Outlined.FolderOpen,
+                    title = "输出目录",
+                    subtitle = if (settings.outputDirUri.isBlank()) {
+                        "默认（相册 Pictures/ReaScale）"
+                    } else {
+                        "自定义目录（点按更换，长按恢复默认）"
+                    },
+                    onClick = { dirPickerLauncher.launch(null) },
+                    onLongClick = {
+                        scope.launch {
+                            app.settingsRepository.update { it.copy(outputDirUri = "") }
+                        }
+                    }
                 )
                 SettingsDivider()
                 SettingsSwitchItem(
@@ -763,18 +803,26 @@ private fun SettingsValueItem(
     }
 }
 
-/** 可点击型设置项（带 ripple） */
+/** 可点击型设置项（带 ripple；[FIX] 支持可选长按） */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SettingsClickableItem(
     icon: ImageVector,
     title: String,
     subtitle: String?,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .let { m ->
+                if (onLongClick != null) {
+                    m.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+                } else {
+                    m.clickable(onClick = onClick)
+                }
+            }
             .padding(horizontal = Spacing.md, vertical = Spacing.sm),
         verticalAlignment = Alignment.CenterVertically
     ) {

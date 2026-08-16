@@ -59,7 +59,9 @@ class ReaScaleApp : Application() {
                     profile = profile,
                     paramsProvider = { paramsRepository.get(profileId) }
                 )
-            }
+            },
+            // [FIX 2026-08-17] 输出目录：设置页配置的 SAF 目录（空 = 默认相册）
+            outputDirProvider = { settingsRepository.get().outputDirUri }
         )
     }
 
