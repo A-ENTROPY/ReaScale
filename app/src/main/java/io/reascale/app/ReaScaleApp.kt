@@ -114,11 +114,12 @@ class ReaScaleApp : Application() {
                         runCatching { assets.open(paramPath).use { true } }.getOrDefault(false)
                     }
                     p.modelUri.endsWith(".param") -> java.io.File(p.modelUri).exists()
+                    p.modelUri.endsWith(".onnx") -> java.io.File(p.modelUri).exists()
                     else -> false
                 }
                 LogBus.i("ReaScaleApp", "engine id=${p.id} model=${p.modelUri} exists=$exists source=${p.source} baseScale=${p.capabilities.baseScale} mean=${p.capabilities.mean} std=${p.capabilities.std}")
             }
-            // 2026-08-17：ONNX Runtime 已移除（统一走 NCNN），不再探测 ORT
+            // 2026-08-18：ONNX Runtime 恢复（onnxruntime-android 1.23.2，用户导入 .onnx 模型）
             _ready = true
             queueRunner.start()
         }

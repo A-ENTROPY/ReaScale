@@ -120,10 +120,11 @@ fun EnginePickerScreen(
     val builtin = filtered.filter { it.source == EngineSource.BUILTIN }
     val user = filtered.filter { it.source == EngineSource.USER }
 
-    // SAF launcher：多选导入 ncnn 模型（.param + .bin 一起选，可单选 .param）
+    // SAF launcher：多选导入模型
     // [FIX 2026-08-17] 原单选 OpenDocument 只接受 .param：用户选 .bin 就被拒（"不支持格式"）。
     // 现支持多选：识别 .param（结构）与 .bin（权重），两者都选或只选 .param 均可导入；
     // 只选 .bin 时给出明确指引而不是笼统报错。
+    // [FIX 2026-08-18] ONNX 后端恢复：.onnx 单文件直接导入（ORT 推理）。
     val modelPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
@@ -139,20 +140,27 @@ fun EnginePickerScreen(
                     snackbarHostState.showSnackbar("读取文件失败")
                     return@launch
                 }
+                val onnxFile = tmpFiles.firstOrNull { it.name.endsWith(".onnx", ignoreCase = true) }
                 val paramFile = tmpFiles.firstOrNull { it.name.endsWith(".param", ignoreCase = true) }
                 val binFile = tmpFiles.firstOrNull { it.name.endsWith(".bin", ignoreCase = true) }
-                if (paramFile == null) {
-                    // 只有 .bin（或无法识别）：给出明确指引，不再笼统报"不支持"
-                    val msg = if (binFile != null) {
-                        "已选择 .bin 权重文件，还需要 .param 结构文件——请同时选中两者（可多选）"
-                    } else {
-                        "未识别到 .param 模型文件（ncnn 模型 = .param 结构 + .bin 权重，需成对）"
+                val profile = when {
+                    onnxFile != null -> app.engineRepository.importOnnx(onnxFile)
+                    paramFile != null -> app.engineRepository.importOnnx(paramFile, binOverride = binFile)
+                    binFile != null -> {
+                        // 只有 .bin：给出明确指引，不再笼统报"不支持"
+                        snackbarHostState.showSnackbar(
+                            "已选择 .bin 权重文件，还需要 .param 结构文件——请同时选中两者（可多选）"
+                        )
+                        return@launch
                     }
-                    snackbarHostState.showSnackbar(msg)
-                    return@launch
+                    else -> {
+                        snackbarHostState.showSnackbar(
+                            "未识别到模型文件（支持 .onnx 单文件，或 ncnn 的 .param+.bin 成对）"
+                        )
+                        return@launch
+                    }
                 }
-                // 2. 导入（多选时把 .bin 一并交给 importOnnx，自动改名为 param 同名）
-                val profile = app.engineRepository.importOnnx(paramFile, binOverride = binFile)
+                // 2. 导入完成
                 snackbarHostState.showSnackbar("已导入：${profile.displayName}")
             } catch (t: Throwable) {
                 snackbarHostState.showSnackbar("导入失败：${t.message ?: "未知错误"}")

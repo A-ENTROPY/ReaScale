@@ -18,9 +18,11 @@ android {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.3.1-a29"
+        versionCode = 21
+        versionName = "0.3.1-a32"
         vectorDrawables { useSupportLibrary = true }
+        // [FIX 2026-08-18] 仪器测试需要显式 runner（androidTest 用）
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -131,6 +133,9 @@ dependencies {
     // [FIX 2026-08-17] AVIF 编码：awxkee/avif-coder（libavif+libaom 软件编码，不依赖设备 AV1 硬件）
     // 2.2.0（minSdk 24，无 compileSdk 36 要求）；2.2.1 要求 compileSdk 36
     implementation("io.github.awxkee:avif-coder:2.2.0")
+    // 2026-08-18：ONNX 推理恢复：onnxruntime-android 1.23.2（用户导入 .onnx 模型）
+    // （2026-08-17 曾移除：统一走 NCNN；现恢复双后端。libs 目录不再被引用）
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.23.2")
 
     // M7 队列（占位声明，M7 阶段才启用 Worker）
     implementation("androidx.work:work-runtime-ktx:2.9.1")

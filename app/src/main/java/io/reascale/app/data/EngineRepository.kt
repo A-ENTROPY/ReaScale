@@ -248,10 +248,9 @@ class EngineRepository(private val context: Context) {
      * 3. 写入 profile.json
      * 4. 返回新 profile
      *
-     * 支持格式：
-     * - ncnn 模型：.param + 同名 .bin（成对）
-     * - 其他（.onnx 等）：抛出异常 —— ONNX 推理后端已移除（统一走 NCNN），
-     *   导入 ONNX 会产生无法运行的 profile，必须显式拒绝
+     * 支持格式（[FIX 2026-08-18] ONNX 后端恢复，双格式导入）：
+     * - onnx 模型：.onnx 单文件 → models/<id>.onnx（ORT 推理）
+     * - ncnn 模型：.param + 同名 .bin（成对）→ models/<id>/ 目录
      *
      * @param src 待复制的源文件（通常来自 SAF 复制到 cacheDir/imports/）
      * @param binOverride [FIX 2026-08-17] 用户多选时提供的 .bin 文件（可为 null，
@@ -265,71 +264,107 @@ class EngineRepository(private val context: Context) {
         userDisplayName: String? = null
     ): EngineProfile = withContext(Dispatchers.IO) {
         mutex.withLock {
-            if (!src.name.endsWith(".param", ignoreCase = true)) {
-                throw IllegalStateException(
-                    "不支持的模型格式（${src.name}）：ONNX 推理已停用，请导入 ncnn 模型（.param 文件，需与同名 .bin 成对选择）"
+            val profile = when {
+                src.name.endsWith(".onnx", ignoreCase = true) -> importOnnxFile(src, userDisplayName)
+                src.name.endsWith(".param", ignoreCase = true) -> importNcnnFile(src, binOverride, userDisplayName)
+                else -> throw IllegalStateException(
+                    "不支持的模型格式（${src.name}）：请导入 .onnx 模型，或 ncnn 模型（.param 需与同名 .bin 成对选择）"
                 )
             }
-            // 1. 生成新 ID + 复制 .param 与 .bin 到 models/<id>/ 目录
-            val id = "user_${System.currentTimeMillis()}"
-            val modelDir2 = File(modelsDir, id).apply { mkdirs() }
-            val dst = File(modelDir2, src.name)
-            src.copyTo(dst, overwrite = true)
-            // bin 来源：优先多选提供的 .bin，否则找 src 同目录同名 .bin
-            val srcBin = binOverride?.takeIf { it.exists() && it.name.endsWith(".bin", ignoreCase = true) }
-                ?: File(src.parentFile, src.name.replace(".param", ".bin"))
-            if (!srcBin.exists()) {
-                dst.delete()
-                throw IllegalStateException(
-                    "缺少模型权重文件：${srcBin.name}（.param 需与同名 .bin 成对选择）"
-                )
-            }
-            // 复制为 param 同名，保证 C++ 端 param→bin 路径推导一致
-            srcBin.copyTo(File(modelDir2, dst.name.replace(".param", ".bin")), overwrite = true)
-
-            // 2. Auto-Probe：读文件大小 + 文件名启发式推断
-            val sizeBytes = dst.length()
-            val probe = AutoProbe.probe(
-                file = dst,
-                filename = src.name
-            )
-
-            // 3. 构造 profile
-            val displayName = userDisplayName?.takeIf { it.isNotBlank() }
-                ?: src.nameWithoutExtension.take(32)
-            // ncnn 模型 modelUri 指向 .param 文件路径（ImageProcessor 据此路由）
-            val modelUri = dst.absolutePath
-            // [FIX 2026-08-17 v2] 模型体积显示权重文件(.bin)大小——.param 是几 KB 的结构
-            // 文本，旧实现显示 0MB/0B。统一 KB/MB 格式化
-            val binFile = File(modelDir2, dst.name.replace(".param", ".bin"))
-            val totalBytes = sizeBytes + (binFile.length())
-            val profile = EngineProfile(
-                id = id,
-                displayName = displayName,
-                source = EngineSource.USER,
-                modelUri = modelUri,
-                domain = probe.domain,
-                capabilities = EngineCapabilities(
-                    baseScale = probe.baseScale,
-                    maxInputEdge = probe.maxInputEdge,
-                    maxInputPixels = probe.maxInputPixels,
-                    inputLayout = "NCHW",
-                    inputDtype = "float32",
-                    mean = probe.mean,
-                    std = probe.std,
-                    fixedSize = probe.fixedSize,
-                    channels = 3
-                ),
-                note = "${formatSize(totalBytes)} · ${probe.probeNote} · NCNN 模型",
-                sha256 = "" // TODO M4: 算 SHA256
-            )
-
-            // 4. 持久化
+            // 持久化
             val list = _profiles.value.toMutableList()
             list.add(profile)
             persist(list)
             profile
         }
+    }
+
+    /** 导入 ONNX 单文件模型 → models/<id>.onnx */
+    private fun importOnnxFile(src: File, userDisplayName: String?): EngineProfile {
+        val id = "user_${System.currentTimeMillis()}"
+        val dst = File(modelsDir, "$id.onnx")
+        src.copyTo(dst, overwrite = true)
+
+        val probe = AutoProbe.probe(file = dst, filename = src.name)
+        val displayName = userDisplayName?.takeIf { it.isNotBlank() }
+            ?: src.nameWithoutExtension.take(32)
+        return EngineProfile(
+            id = id,
+            displayName = displayName,
+            source = EngineSource.USER,
+            modelUri = dst.absolutePath,   // ImageProcessor 按 .onnx 后缀路由到 OnnxEngine
+            domain = probe.domain,
+            capabilities = EngineCapabilities(
+                baseScale = probe.baseScale,
+                maxInputEdge = probe.maxInputEdge,
+                maxInputPixels = probe.maxInputPixels,
+                inputLayout = "NCHW",
+                inputDtype = "float32",
+                mean = probe.mean,
+                std = probe.std,
+                fixedSize = probe.fixedSize,
+                channels = 3
+            ),
+            note = "${formatSize(dst.length())} · ${probe.probeNote} · ONNX 模型（ORT 自动探测尺寸/语义）",
+            sha256 = "" // TODO M4: 算 SHA256
+        )
+    }
+
+    /** 导入 ncnn 成对模型（.param + .bin）→ models/<id>/ 目录 */
+    private fun importNcnnFile(src: File, binOverride: File?, userDisplayName: String?): EngineProfile {
+        // 1. 生成新 ID + 复制 .param 与 .bin 到 models/<id>/ 目录
+        val id = "user_${System.currentTimeMillis()}"
+        val modelDir2 = File(modelsDir, id).apply { mkdirs() }
+        val dst = File(modelDir2, src.name)
+        src.copyTo(dst, overwrite = true)
+        // bin 来源：优先多选提供的 .bin，否则找 src 同目录同名 .bin
+        val srcBin = binOverride?.takeIf { it.exists() && it.name.endsWith(".bin", ignoreCase = true) }
+            ?: File(src.parentFile, src.name.replace(".param", ".bin"))
+        if (!srcBin.exists()) {
+            dst.delete()
+            throw IllegalStateException(
+                "缺少模型权重文件：${srcBin.name}（.param 需与同名 .bin 成对选择）"
+            )
+        }
+        // 复制为 param 同名，保证 C++ 端 param→bin 路径推导一致
+        srcBin.copyTo(File(modelDir2, dst.name.replace(".param", ".bin")), overwrite = true)
+
+        // 2. Auto-Probe：读文件大小 + 文件名启发式推断
+        val sizeBytes = dst.length()
+        val probe = AutoProbe.probe(
+            file = dst,
+            filename = src.name
+        )
+
+        // 3. 构造 profile
+        val displayName = userDisplayName?.takeIf { it.isNotBlank() }
+            ?: src.nameWithoutExtension.take(32)
+        // ncnn 模型 modelUri 指向 .param 文件路径（ImageProcessor 据此路由）
+        val modelUri = dst.absolutePath
+        // [FIX 2026-08-17 v2] 模型体积显示权重文件(.bin)大小——.param 是几 KB 的结构
+        // 文本，旧实现显示 0MB/0B。统一 KB/MB 格式化
+        val binFile = File(modelDir2, dst.name.replace(".param", ".bin"))
+        val totalBytes = sizeBytes + (binFile.length())
+        return EngineProfile(
+            id = id,
+            displayName = displayName,
+            source = EngineSource.USER,
+            modelUri = modelUri,
+            domain = probe.domain,
+            capabilities = EngineCapabilities(
+                baseScale = probe.baseScale,
+                maxInputEdge = probe.maxInputEdge,
+                maxInputPixels = probe.maxInputPixels,
+                inputLayout = "NCHW",
+                inputDtype = "float32",
+                mean = probe.mean,
+                std = probe.std,
+                fixedSize = probe.fixedSize,
+                channels = 3
+            ),
+            note = "${formatSize(totalBytes)} · ${probe.probeNote} · NCNN 模型",
+            sha256 = "" // TODO M4: 算 SHA256
+        )
     }
 
     /**

@@ -6,6 +6,7 @@ import android.net.Uri
 import io.reascale.app.core.MemoryBudget
 import io.reascale.app.core.Tile
 import io.reascale.app.core.engine.NcnnEngine
+import io.reascale.app.core.engine.OnnxEngine
 import io.reascale.app.core.TilePlan
 import io.reascale.app.core.engine.UpscaleEngine
 import io.reascale.app.core.engine.UpscaleEngine.Companion.selectPath
@@ -414,13 +415,13 @@ class ImageProcessor(
         /**
          * 默认的 engineProvider
          *
-         * 2026-08-09 兼容策略：
+         * 2026-08-18 兼容策略（ONNX 后端恢复）：
          * 1. `ncnn:xxx/yyy/file` → NCNN 原生（libreascale_ncnn.so）
          *    modelDir = "ncnn/xxx/yyy"，paramName = "file.param"
-         * 2. `asset:models/foo.onnx` → 旧 ONNX 路径，已知 4 个 BUILTIN
-         *    realesrgan-x* 已经迁移到 ncnn;；若用户还存在 ONNX 路径，回退到
-         *    OnnxEngine（兼容旧导入的 ONNX 模型）
-         * 3. 其它 → 抛异常
+         * 2. `*.param` 文件路径 → NCNN 原生（用户导入 ncnn 模型）
+         * 3. `*.onnx` 文件路径 → OnnxEngine（用户导入 ONNX 模型，ORT 自动探测）
+         * 4. `asset:models/` 前缀 → 内置 ONNX 资产缺失，显式报错
+         * 5. 其它 → 抛异常
          */
         fun defaultEngineProvider(
             context: Context,
@@ -476,10 +477,32 @@ class ImageProcessor(
                 throw IllegalStateException("导入的模型文件不存在: $uri")
             }
 
-            // 2) 旧 ONNX 路径不再支持（OnnxEngine 类已移除，统一走 NCNN）
-            if (uri.startsWith("asset:models/") || uri.endsWith(".onnx")) {
-                LogBus.e("ImageProcessor", "🔴 ONNX 路径已废弃: ${profile.id} (uri=$uri)")
-                throw IllegalStateException("ONNX 路径已停用，请改用 ncnn: 前缀")
+            // [FIX 2026-08-18] 用户导入 ONNX 模型：modelUri = 内部文件绝对路径（.onnx）
+            // OnnxEngine 自动探测尺寸/语义（scale、残差、输入域），无需档案元数据准确
+            if (uri.endsWith(".onnx")) {
+                val onnxFile = java.io.File(uri)
+                if (!onnxFile.exists()) {
+                    throw IllegalStateException("导入的模型文件不存在: $uri")
+                }
+                try {
+                    val engine = OnnxEngine.create(
+                        profile = profile,
+                        context = context,
+                        modelFilePath = onnxFile.absolutePath,
+                        paramsProvider = paramsProvider
+                    )
+                    LogBus.i("ImageProcessor", "🟢 使用导入的 ONNX 模型: ${profile.id} (${onnxFile.name})")
+                    return engine
+                } catch (t: Throwable) {
+                    LogBus.e("ImageProcessor", "🔴 ONNX 加载失败: ${profile.id}", t)
+                    throw IllegalStateException("ONNX 引擎加载失败: ${t.message}", t)
+                }
+            }
+
+            // 2) 旧 asset:models/ 路径：内置 ONNX 资产不存在（GFPGAN 待补），显式报错
+            if (uri.startsWith("asset:models/")) {
+                LogBus.e("ImageProcessor", "🔴 内置 ONNX 资产缺失: ${profile.id} (uri=$uri)")
+                throw IllegalStateException("内置模型文件缺失: $uri")
             }
 
             // 3) 其它路径
