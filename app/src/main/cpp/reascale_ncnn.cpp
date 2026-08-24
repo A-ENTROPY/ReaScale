@@ -495,8 +495,13 @@ static jboolean session_process(
     // - ncnn::Net 允许多个 Extractor 并发（官方 realesrgan/realcugan 用 OpenMP 并行 tile）
     // - 每个 tile 独立读写输出位图的不同矩形 → 无数据竞争
     // - 进度回调在行带结束的主线程统一调用（JNI env 非本线程安全使用）
-    // - 并行度 = num_threads（Kotlin 传入，默认 CPU 核数受控值）
-    const int par = std::max(1, s->num_threads);
+    // - [FIX 过订阅] par × opt.num_threads ≤ CPU 核数：par = min(N,4)，tile 内 = ceil(N/par)
+    //   （此前两者同为 N → 36+ 线程挤 8 核，sys 占比 138-444%）
+    const int hw = s->num_threads > 0 ? s->num_threads : 4;
+    const int par = std::min(hw, 4);
+    const int inner_threads = std::max(1, hw / par);
+    s->net.opt.num_threads = inner_threads;
+    __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "parallel: par=%d inner=%d", par, inner_threads);
     std::atomic<int> done_atomic{0};
     std::atomic<bool> failed_atomic{false};
 
