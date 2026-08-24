@@ -222,15 +222,29 @@ class ImageProcessor(
         val maxOutputBitmapBytes = 200L * 1024L * 1024L  // 200MB
         val canFitSingleBitmap = outputBitmapBytes <= maxOutputBitmapBytes
 
-        // [FIX 2026-08-18] 超大输出（>200MB bitmap）且格式为 JXL：
-        // 走流式编码（libjxl chunked frame），推理分块输出直接流式编码，
-        // 输出不驻留整图内存，ImageProcessor 返回占位 Bitmap（已直接写入目标）。
-        if (!canFitSingleBitmap && job.encodeOptions.format == OutputFormat.JXL) {
-            processTiledStreamingJxl(
-                engine, srcUri, srcW, srcH, factor, baseName, job, progress
-            )
-            // 占位：process() 检测 streamingDoneUri 后直接返回，不走到尺寸校正
-            return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        // [FIX 2026-08-18] 超大输出（>200MB bitmap）：
+        // JXL → libjxl 流式编码；PNG → 纯 Kotlin StreamingPngWriter；
+        // 其他格式暂不支持流式，明确报错并给出建议。
+        if (!canFitSingleBitmap) {
+            when (job.encodeOptions.format) {
+                OutputFormat.JXL -> {
+                    processTiledStreamingJxl(
+                        engine, srcUri, srcW, srcH, factor, baseName, job, progress
+                    )
+                    // 占位：process() 检测 streamingDoneUri 后直接返回，不走到尺寸校正
+                    return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                }
+                OutputFormat.PNG -> {
+                    processTiledStreamingPng(
+                        engine, srcUri, srcW, srcH, factor, baseName, job, progress
+                    )
+                    return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                }
+                else -> throw IllegalStateException(
+                    "输出图片过大（${outPx / 1_000_000}MP ≈ ${outputBitmapBytes / 1024 / 1024}MB）。" +
+                        "该尺寸请把输出格式切换为 PNG 或 JXL（支持流式写出）"
+                )
+            }
         }
 
         // [FIX 2026-08-11] 输出 bitmap > 200MB 时抛异常，避免 OOM → native SIGSEGV
@@ -244,6 +258,105 @@ class ImageProcessor(
         return processTiledSingleCanvas(
             engine, srcUri, srcW, srcH, plan, factor, outW, outH, progress
         )
+    }
+
+    /**
+     * 流式 PNG：超大输出不驻留整图（纯 Kotlin StreamingPngWriter）。
+     * 行带两阶段：先推理行带内所有列 tile（保留位图），再逐输出行拼整行喂入。
+     * 行带位图内存 ≈ nCols × bandOutH × bandOutW × 4（tile=256 → ~80MB）。
+     */
+    private suspend fun processTiledStreamingPng(
+        engine: UpscaleEngine,
+        srcUri: Uri,
+        srcW: Int,
+        srcH: Int,
+        factor: Int,
+        baseName: String,
+        job: ImageJob,
+        progress: (Float) -> Unit
+    ): Bitmap {
+        val outW = srcW * factor
+        val outH = srcH * factor
+        LogBus.i("ImageProcessor", "🟩 streaming-PNG: src=${srcW}x${srcH} → out=${outW}x${outH} (${outW.toLong() * outH}px)")
+
+        val tile = MemoryBudget.maxTileEdge(context).coerceIn(128, 256)
+        val outTile = tile * factor
+        val bands = (srcH + tile - 1) / tile
+        val cols = (srcW + tile - 1) / tile
+        val totalTiles = bands * cols
+        var doneTiles = 0
+
+        val displayName = "${baseName}_${factor}x"
+        // PNG 无损：压缩级别取中低档平衡速度/体积
+        val compressionLevel = if (job.encodeOptions.quality >= 100) 6 else 4
+
+        val uri = MediaStoreWriter.writePngStreaming(
+            context = context,
+            displayName = displayName,
+            outputDirUri = outputDirProvider(),
+            width = outW,
+            height = outH,
+            compressionLevel = compressionLevel,
+            produce = { feed ->
+                for (band in 0 until bands) {
+                    val y0 = band * tile
+                    val th = (srcH - y0).coerceAtMost(tile)
+                    // 1. 推理本行带所有列
+                    data class BandTile(val xOff: Int, val bmp: Bitmap)
+                    val rowBitmaps = mutableListOf<BandTile>()
+                    try {
+                        for (col in 0 until cols) {
+                            val x0 = col * tile
+                            val tw = (srcW - x0).coerceAtMost(tile)
+                            val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
+                            val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
+                                ?: throw IllegalStateException("分块解码失败 at $rect")
+                            try {
+                                val up = engine.upscale(
+                                    input = tileBmp,
+                                    plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
+                                ) { }
+                                rowBitmaps.add(BandTile(x0 * factor, up))
+                            } finally {
+                                if (!tileBmp.isRecycled) tileBmp.recycle()
+                            }
+                            doneTiles++
+                            progress(0.10f + (doneTiles.toFloat() / totalTiles) * 0.82f)
+                        }
+                        // 2. 行带内逐行拼整行喂出
+                        val bandOutH = rowBitmaps.maxOf { it.bmp.height }
+                        val row = ByteArray(outW * 3)
+                        for (yy in 0 until bandOutH) {
+                            java.util.Arrays.fill(row, 0)
+                            for (bt in rowBitmaps) {
+                                if (yy >= bt.bmp.height) continue
+                                val w = bt.bmp.width
+                                val pxRow = IntArray(w)
+                                bt.bmp.getPixels(pxRow, 0, w, 0, yy, w, 1)
+                                var xx = 0
+                                while (xx < w) {
+                                    val p = pxRow[xx]
+                                    val o = (bt.xOff + xx) * 3
+                                    row[o] = ((p shr 16) and 0xFF).toByte()
+                                    row[o + 1] = ((p shr 8) and 0xFF).toByte()
+                                    row[o + 2] = (p and 0xFF).toByte()
+                                    xx++
+                                }
+                            }
+                            feed(band * outTile + yy, 0, row)
+                        }
+                    } finally {
+                        rowBitmaps.forEach { if (!it.bmp.isRecycled) it.bmp.recycle() }
+                        rowBitmaps.clear()
+                    }
+                }
+            },
+            progress = progress
+        )
+        if (uri == null) throw IllegalStateException("流式 PNG 输出失败")
+        streamingDoneUri = uri
+        LogBus.i("ImageProcessor", "✅ streaming-PNG done: $uri")
+        return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
     }
 
     /**
