@@ -464,6 +464,92 @@ object MediaStoreWriter {
         }
     }
 
+    /**
+     * 流式写入超大 JPEG（纯 Kotlin StreamingJpegWriter，不驻留整图）。
+     * produce 收到 feed(y, xOff, row)：行序严格递增、每行必须完整覆盖 [0,width)。
+     */
+    suspend fun writeJpegStreaming(
+        context: Context,
+        displayName: String,
+        outputDirUri: String?,
+        width: Int,
+        height: Int,
+        quality: Int,
+        produce: suspend (feed: suspend (y: Int, xOff: Int, row: ByteArray) -> Unit) -> Unit,
+        progress: (Float) -> Unit
+    ): Uri? = withContext(Dispatchers.IO) {
+        val ext = "jpg"
+        val mime = "image/jpeg"
+        val fileName = "$displayName.$ext"
+        val resolver = context.contentResolver
+
+        val (targetUri, pending) = if (!outputDirUri.isNullOrBlank()) {
+            val tree = DocumentFile.fromTreeUri(context, Uri.parse(outputDirUri)) ?: return@withContext null
+            val file = tree.createFile(mime, fileName) ?: return@withContext null
+            file.uri to false
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$ALBUM_NAME")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                ?: return@withContext null
+            uri to true
+        } else {
+            val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), ALBUM_NAME).apply { mkdirs() }
+            Uri.fromFile(File(dir, fileName)) to false
+        }
+
+        return@withContext try {
+            val out = resolver.openOutputStream(targetUri) ?: return@withContext null
+            var ok = true
+            try {
+                val writer = io.reascale.app.core.imageio.StreamingJpegWriter(out, width, height, quality)
+                val pendingRows = HashMap<Int, ByteArray>()
+                val filled = HashMap<Int, Int>()
+                produce { y, xOff, row ->
+                    val buf = pendingRows.getOrPut(y) { ByteArray(width * 3) }
+                    System.arraycopy(row, 0, buf, xOff * 3, row.size)
+                    filled[y] = (filled[y] ?: 0) + row.size
+                    if ((filled[y] ?: 0) >= width * 3) {
+                        writer.feedRow(y, buf)
+                        pendingRows.remove(y); filled.remove(y)
+                    }
+                }
+                writer.close()
+                progress(0.95f)
+            } catch (t: Throwable) {
+                android.util.Log.e("MediaStoreWriter", "writeJpegStreaming failed", t)
+                ok = false
+            } finally {
+                runCatching { out.close() }
+            }
+            if (!ok) {
+                runCatching { resolver.delete(targetUri, null, null) }
+                null
+            } else {
+                if (pending) {
+                    resolver.update(targetUri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null)
+                } else if (targetUri.scheme == "file") {
+                    runCatching {
+                        resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                            put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                            put(MediaStore.MediaColumns.DATA, targetUri.path)
+                        })
+                    }
+                }
+                targetUri
+            }
+        } catch (t: Throwable) {
+            android.util.Log.e("MediaStoreWriter", "writeJpegStreaming failed", t)
+            runCatching { resolver.delete(targetUri, null, null) }
+            null
+        }
+    }
+
     private fun mimeFor(format: OutputFormat): String = when (format) {
         OutputFormat.JPEG -> "image/jpeg"
         OutputFormat.PNG  -> "image/png"
