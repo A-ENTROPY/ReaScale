@@ -370,23 +370,30 @@ class ImageProcessor(
         totalTiles: Int,
         progress: (Float) -> Unit
     ): List<BandTile> = coroutineScope {
+        // [PERF] 限流 4 路并发：ORT intra-op=2 → 4×2=8 线程填满大核不过订阅
+        val sem = kotlinx.coroutines.sync.Semaphore(4)
         val jobs = (0 until cols).map { col ->
             async(Dispatchers.Default) {
-                val x0 = col * tile
-                val tw = (srcW - x0).coerceAtMost(tile)
-                val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
-                val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
-                    ?: throw IllegalStateException("分块解码失败 at $rect")
+                sem.acquire()
                 try {
-                    val up = engine.upscale(
-                        input = tileBmp,
-                        plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
-                    ) { }
-                    val d = doneTiles.incrementAndGet()
-                    progress(0.10f + (d.toFloat() / totalTiles) * 0.82f)
-                    BandTile(x0 * factor, up)
+                    val x0 = col * tile
+                    val tw = (srcW - x0).coerceAtMost(tile)
+                    val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
+                    val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
+                        ?: throw IllegalStateException("分块解码失败 at $rect")
+                    try {
+                        val up = engine.upscale(
+                            input = tileBmp,
+                            plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
+                        ) { }
+                        val d = doneTiles.incrementAndGet()
+                        progress(0.10f + (d.toFloat() / totalTiles) * 0.82f)
+                        BandTile(x0 * factor, up)
+                    } finally {
+                        if (!tileBmp.isRecycled) tileBmp.recycle()
+                    }
                 } finally {
-                    if (!tileBmp.isRecycled) tileBmp.recycle()
+                    sem.release()
                 }
             }
         }

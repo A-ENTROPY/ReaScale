@@ -69,10 +69,12 @@ class OnnxEngine(
         synchronized(this) {
             session?.let { return it to probe!! }
             val params = paramsProvider()
+            // [PERF 2026-08-25] intra-op 降为 2：外层流式路径已有 tile 级并行
+            // （inferBandParallel semaphore=4），4×2=8 线程正好填满大核，避免过订阅
             val numThreads = if (params.concurrencyOverride.enabled) {
                 params.concurrencyOverride.value.coerceIn(1, 4)
             } else {
-                minOf(4, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+                minOf(2, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
             }
             val env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
@@ -304,9 +306,10 @@ class OnnxEngine(
     // ============ 推理 ============
 
     override fun upscale(input: Bitmap, plan: UpscalePlan, progress: (Float) -> Unit): Bitmap {
-        return kotlinx.coroutines.runBlocking {
-            inferenceLock.withLock { _upscale(input, plan, progress) }
-        }
+        // [PERF 2026-08-25] 去掉 inferenceLock：ORT Session.run 线程安全（官方文档），
+        // _upscale 只读 session/probe 无共享可变状态，可并发。
+        // 并发过订阅由调用方（inferBandParallel semaphore）+ intra-op=2 控制。
+        return _upscale(input, plan, progress)
     }
 
     private fun _upscale(input: Bitmap, plan: UpscalePlan, progress: (Float) -> Unit): Bitmap {
