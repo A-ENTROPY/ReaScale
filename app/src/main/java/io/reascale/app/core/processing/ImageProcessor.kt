@@ -250,9 +250,18 @@ class ImageProcessor(
                     )
                     return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
                 }
+                // [FIX 2026-08-25] WebP 无流式编码器：超大图自动降级 JPEG（有损质量档一致）
+                OutputFormat.WEBP -> {
+                    LogBus.w("ImageProcessor", "⚠️ WebP 不支持超大图流式输出，已自动改用 JPEG")
+                    val jpegJob = job.copy(encodeOptions = job.encodeOptions.copy(format = OutputFormat.JPEG))
+                    processTiledStreamingJpeg(
+                        engine, srcUri, srcW, srcH, factor, baseName, jpegJob, progress
+                    )
+                    return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                }
                 else -> throw IllegalStateException(
                     "输出图片过大（${outPx / 1_000_000}MP ≈ ${outputBitmapBytes / 1024 / 1024}MB）。" +
-                        "该尺寸请把输出格式切换为 JPEG / PNG / JXL（支持流式写出）"
+                        "该尺寸请把输出格式切换为 JPEG / PNG / JXL（WebP 会自动降级 JPEG）"
                 )
             }
         }
@@ -426,8 +435,8 @@ class ImageProcessor(
         val totalTiles = bands * cols
 
         val displayName = "${baseName}_${factor}x"
-        // PNG 无损：压缩级别取中低档平衡速度/体积
-        val compressionLevel = if (job.encodeOptions.quality >= 100) 6 else 4
+        // [FIX 2026-08-25] 质量条映射：q=100→0(最快) q=1→9(最大压缩)，与 Bitmap.compress 一致
+        val compressionLevel = QualityMapper.pngCompressionLevel(job.encodeOptions)
 
         val uri = MediaStoreWriter.writePngStreaming(
             context = context,
