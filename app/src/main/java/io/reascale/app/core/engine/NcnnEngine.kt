@@ -62,11 +62,13 @@ class NcnnEngine(
             val params = paramsProvider()
             val rn = ReascaleNcnn()
             try {
-                // [FIX 2026-08-16] 默认 1 线程（防 OpenMP 死锁），用户调 concurrencyOverride 才增大
+                // [PERF 2026-08-25] 默认 = CPU 核数（上限 6）：C++ 层 tile 行带 std::thread 并行，
+                // 并行度即同时推理的 tile 数。原"默认 1 防 OpenMP 死锁"已由行带并行方案替代
+                // （死锁场景是 Kotlin 多 worker 并发进 native，现仍被 inferenceLock 挡住）。
                 val numThreads = if (params.concurrencyOverride.enabled) {
-                    params.concurrencyOverride.value.coerceIn(1, 4)
+                    params.concurrencyOverride.value.coerceIn(1, 8)
                 } else {
-                    1
+                    Runtime.getRuntime().availableProcessors().coerceIn(2, 6)
                 }
                 rn.init(gpuid = gpuid, ttaMode = params.ttaMode.effective(), numThreads = numThreads)
 

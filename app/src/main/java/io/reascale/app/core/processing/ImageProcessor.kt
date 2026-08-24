@@ -19,6 +19,10 @@ import io.reascale.app.data.EngineProfile
 import io.reascale.app.data.ImageJob
 import io.reascale.app.data.OutputFormat
 import io.reascale.app.debug.LogBus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 /**
  * 单张图超分全流程
@@ -289,7 +293,6 @@ class ImageProcessor(
         val bands = (srcH + tile - 1) / tile
         val cols = (srcW + tile - 1) / tile
         val totalTiles = bands * cols
-        var doneTiles = 0
 
         val displayName = "${baseName}_${factor}x"
         val quality = QualityMapper.directQuality(job.encodeOptions)
@@ -302,30 +305,15 @@ class ImageProcessor(
             height = outH,
             quality = quality,
             produce = { feed ->
+                val doneTiles = java.util.concurrent.atomic.AtomicInteger(0)
                 for (band in 0 until bands) {
                     val y0 = band * tile
                     val th = (srcH - y0).coerceAtMost(tile)
-                    data class BandTile(val xOff: Int, val bmp: Bitmap)
-                    val rowBitmaps = mutableListOf<BandTile>()
+                    // 并行推理本行带所有列
+                    val rowBitmaps = inferBandParallel(
+                        engine, srcUri, y0, th, cols, tile, srcW, factor, doneTiles, totalTiles, progress
+                    )
                     try {
-                        for (col in 0 until cols) {
-                            val x0 = col * tile
-                            val tw = (srcW - x0).coerceAtMost(tile)
-                            val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
-                            val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
-                                ?: throw IllegalStateException("分块解码失败 at $rect")
-                            try {
-                                val up = engine.upscale(
-                                    input = tileBmp,
-                                    plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
-                                ) { }
-                                rowBitmaps.add(BandTile(x0 * factor, up))
-                            } finally {
-                                if (!tileBmp.isRecycled) tileBmp.recycle()
-                            }
-                            doneTiles++
-                            progress(0.10f + (doneTiles.toFloat() / totalTiles) * 0.82f)
-                        }
                         val bandOutH = rowBitmaps.maxOf { it.bmp.height }
                         val row = ByteArray(outW * 3)
                         for (yy in 0 until bandOutH) {
@@ -347,7 +335,6 @@ class ImageProcessor(
                         }
                     } finally {
                         rowBitmaps.forEach { if (!it.bmp.isRecycled) it.bmp.recycle() }
-                        rowBitmaps.clear()
                     }
                 }
             },
@@ -357,6 +344,53 @@ class ImageProcessor(
         streamingDoneUri = uri
         LogBus.i("ImageProcessor", "✅ streaming-JPEG done: $uri")
         return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+    }
+
+    /** 行带 tile 数据 */
+    private class BandTile(val xOff: Int, val bmp: Bitmap)
+
+    /**
+     * [PERF 2026-08-25] 行带 tile 并行推理：解码+推理并发（Dispatchers.Default），
+     * 结果按列序返回。ONNX ORT Session 线程安全可并发 run；
+     * NCNN 引擎由 C++ 内部行带并行，Kotlin 层 inferenceLock 会串行化但
+     * 解码仍并行，且 NCNN 场景走 processTiledSingleCanvas 不经过本函数。
+     *
+     * @return 与 [cols] 同序的放大后位图列表（调用方负责 recycle）
+     */
+    private suspend fun inferBandParallel(
+        engine: UpscaleEngine,
+        srcUri: Uri,
+        y0: Int,
+        th: Int,
+        cols: Int,
+        tile: Int,
+        srcW: Int,
+        factor: Int,
+        doneTiles: java.util.concurrent.atomic.AtomicInteger,
+        totalTiles: Int,
+        progress: (Float) -> Unit
+    ): List<BandTile> = coroutineScope {
+        val jobs = (0 until cols).map { col ->
+            async(Dispatchers.Default) {
+                val x0 = col * tile
+                val tw = (srcW - x0).coerceAtMost(tile)
+                val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
+                val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
+                    ?: throw IllegalStateException("分块解码失败 at $rect")
+                try {
+                    val up = engine.upscale(
+                        input = tileBmp,
+                        plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
+                    ) { }
+                    val d = doneTiles.incrementAndGet()
+                    progress(0.10f + (d.toFloat() / totalTiles) * 0.82f)
+                    BandTile(x0 * factor, up)
+                } finally {
+                    if (!tileBmp.isRecycled) tileBmp.recycle()
+                }
+            }
+        }
+        jobs.awaitAll()
     }
 
     /**
@@ -383,7 +417,6 @@ class ImageProcessor(
         val bands = (srcH + tile - 1) / tile
         val cols = (srcW + tile - 1) / tile
         val totalTiles = bands * cols
-        var doneTiles = 0
 
         val displayName = "${baseName}_${factor}x"
         // PNG 无损：压缩级别取中低档平衡速度/体积
@@ -397,32 +430,15 @@ class ImageProcessor(
             height = outH,
             compressionLevel = compressionLevel,
             produce = { feed ->
+                val doneTiles = java.util.concurrent.atomic.AtomicInteger(0)
                 for (band in 0 until bands) {
                     val y0 = band * tile
                     val th = (srcH - y0).coerceAtMost(tile)
-                    // 1. 推理本行带所有列
-                    data class BandTile(val xOff: Int, val bmp: Bitmap)
-                    val rowBitmaps = mutableListOf<BandTile>()
+                    // 1. 并行推理本行带所有列
+                    val rowBitmaps = inferBandParallel(
+                        engine, srcUri, y0, th, cols, tile, srcW, factor, doneTiles, totalTiles, progress
+                    )
                     try {
-                        for (col in 0 until cols) {
-                            val x0 = col * tile
-                            val tw = (srcW - x0).coerceAtMost(tile)
-                            val rect = android.graphics.Rect(x0, y0, x0 + tw, y0 + th)
-                            val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
-                                ?: throw IllegalStateException("分块解码失败 at $rect")
-                            try {
-                                val up = engine.upscale(
-                                    input = tileBmp,
-                                    plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
-                                ) { }
-                                rowBitmaps.add(BandTile(x0 * factor, up))
-                            } finally {
-                                if (!tileBmp.isRecycled) tileBmp.recycle()
-                            }
-                            doneTiles++
-                            progress(0.10f + (doneTiles.toFloat() / totalTiles) * 0.82f)
-                        }
-                        // 2. 行带内逐行拼整行喂出
                         val bandOutH = rowBitmaps.maxOf { it.bmp.height }
                         val row = ByteArray(outW * 3)
                         for (yy in 0 until bandOutH) {
@@ -446,7 +462,6 @@ class ImageProcessor(
                         }
                     } finally {
                         rowBitmaps.forEach { if (!it.bmp.isRecycled) it.bmp.recycle() }
-                        rowBitmaps.clear()
                     }
                 }
             },
@@ -480,23 +495,12 @@ class ImageProcessor(
         val outH = srcH * factor
         LogBus.i("ImageProcessor", "🟩 streaming-JXL: src=${srcW}x${srcH} → out=${outW}x${outH} (${outW.toLong() * outH}px)")
 
-        // 无重叠 tile 网格（步长限制 512：引擎每块输出位图 + 累加缓冲受控，
-        // 避免单块输出位图 >200MB 再 OOM）
-        val tile = MemoryBudget.maxTileEdge(context).coerceIn(128, 512)
-        val tiles = mutableListOf<Tile>()
-        var ty = 0
-        while (ty < srcH) {
-            val th = (srcH - ty).coerceAtMost(tile)
-            var tx = 0
-            while (tx < srcW) {
-                val tw = (srcW - tx).coerceAtMost(tile)
-                tiles.add(Tile(tx, ty, tw, th))
-                tx += tile
-            }
-            ty += tile
-        }
-        val tileCount = tiles.size.coerceAtLeast(1)
-        LogBus.i("ImageProcessor", "🟩 streaming-JXL tiles=${tileCount} tile=${tile}")
+        // 无重叠 tile 网格（步长限制 512 → 行带并行度受控）
+        val tile = MemoryBudget.maxTileEdge(context).coerceIn(128, 256)
+        val cols = (srcW + tile - 1) / tile
+        val bands = (srcH + tile - 1) / tile
+        val totalTiles = bands * cols
+        LogBus.i("ImageProcessor", "🟩 streaming-JXL grid=${cols}x${bands} tile=$tile")
 
         val displayName = "${baseName}_${factor}x"
         val quality = QualityMapper.directQuality(job.encodeOptions)
@@ -511,29 +515,22 @@ class ImageProcessor(
             quality = quality,
             lossless = lossless,
             produce = { feed ->
-                var processed = 0
-                for (t in tiles) {
-                    val rect = android.graphics.Rect(
-                        t.x, t.y,
-                        (t.x + t.w).coerceAtMost(srcW),
-                        (t.y + t.h).coerceAtMost(srcH)
+                val doneTiles = java.util.concurrent.atomic.AtomicInteger(0)
+                for (band in 0 until bands) {
+                    val y0 = band * tile
+                    val th = (srcH - y0).coerceAtMost(tile)
+                    // 并行推理本行带所有列（tile 输出覆盖语义：后列覆盖同区域？无重叠网格→各列独立）
+                    val rowBitmaps = inferBandParallel(
+                        engine, srcUri, y0, th, cols, tile, srcW, factor, doneTiles, totalTiles, progress
                     )
-                    val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
-                        ?: throw IllegalStateException("分块解码失败 at $rect")
                     try {
-                        val upscaled = engine.upscale(
-                            input = tileBmp,
-                            plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
-                        ) { }
-                        try {
-                            val uW = upscaled.width
-                            val uH = upscaled.height
+                        // 行带内逐 tile 按行喂出（xOff 定位）
+                        for (bt in rowBitmaps) {
+                            val uW = bt.bmp.width
+                            val uH = bt.bmp.height
                             val px = IntArray(uW * uH)
-                            upscaled.getPixels(px, 0, uW, 0, 0, uW, uH)
+                            bt.bmp.getPixels(px, 0, uW, 0, 0, uW, uH)
                             val row = ByteArray(uW * 3)
-                            val outX = t.x * factor
-                            val outY = t.y * factor
-                            // 行池覆盖语义 = 画布覆盖拼接（后块覆盖重叠区）
                             for (yy in 0 until uH) {
                                 val base = yy * uW
                                 for (xx in 0 until uW) {
@@ -542,16 +539,12 @@ class ImageProcessor(
                                     row[xx * 3 + 1] = ((p shr 8) and 0xFF).toByte()
                                     row[xx * 3 + 2] = (p and 0xFF).toByte()
                                 }
-                                feed(outY + yy, outX, row)
+                                feed(y0 * factor + yy, bt.xOff, row)
                             }
-                        } finally {
-                            if (!upscaled.isRecycled) upscaled.recycle()
                         }
                     } finally {
-                        if (!tileBmp.isRecycled) tileBmp.recycle()
+                        rowBitmaps.forEach { if (!it.bmp.isRecycled) it.bmp.recycle() }
                     }
-                    processed++
-                    progress(0.10f + (processed.toFloat() / tileCount) * 0.82f)
                 }
             },
             progress = progress

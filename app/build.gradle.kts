@@ -18,8 +18,8 @@ android {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 30
-        versionName = "0.3.1-a41"
+        versionCode = 31
+        versionName = "0.3.1-a42"
         vectorDrawables { useSupportLibrary = true }
         // [FIX 2026-08-18] 仪器测试需要显式 runner（androidTest 用）
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

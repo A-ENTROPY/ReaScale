@@ -21,6 +21,9 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <atomic>
+#include <thread>
+#include <vector>
 
 #include "ncnn/net.h"
 #include "ncnn/gpu.h"
@@ -488,29 +491,59 @@ static jboolean session_process(
     const int total_tiles = xtiles * ytiles;
     int done_tiles = 0;
 
-    bool ok = true;
-    for (int yi = 0; yi < ytiles && ok; yi++) {
-        for (int xi = 0; xi < xtiles; xi++) {
-            if (!process_tile(s, (const unsigned char*)in_pixels, w, h, in_stride,
-                    xi, yi, tile_nopad, (unsigned char*)out_pixels, out_stride)) {
-                __android_log_print(ANDROID_LOG_ERROR, "ReaScaleNcnn",
-                    "tile(%d/%d,%d/%d) 失败", xi, xtiles, yi, ytiles);
-                ok = false;
-                break;
+    // [PERF 2026-08-25] tile 行带并行：一行带内的 xtiles 用 std::thread 并行推理。
+    // - ncnn::Net 允许多个 Extractor 并发（官方 realesrgan/realcugan 用 OpenMP 并行 tile）
+    // - 每个 tile 独立读写输出位图的不同矩形 → 无数据竞争
+    // - 进度回调在行带结束的主线程统一调用（JNI env 非本线程安全使用）
+    // - 并行度 = num_threads（Kotlin 传入，默认 CPU 核数受控值）
+    const int par = std::max(1, s->num_threads);
+    std::atomic<int> done_atomic{0};
+    std::atomic<bool> failed_atomic{false};
+
+    for (int yi = 0; yi < ytiles && !failed_atomic.load(); yi++) {
+        const int nthr = std::min(par, xtiles);
+        if (nthr <= 1) {
+            for (int xi = 0; xi < xtiles && !failed_atomic.load(); xi++) {
+                if (!process_tile(s, (const unsigned char*)in_pixels, w, h, in_stride,
+                        xi, yi, tile_nopad, (unsigned char*)out_pixels, out_stride)) {
+                    __android_log_print(ANDROID_LOG_ERROR, "ReaScaleNcnn",
+                        "tile(%d/%d,%d/%d) 失败", xi, xtiles, yi, ytiles);
+                    failed_atomic = true;
+                } else {
+                    done_atomic++;
+                }
             }
-            done_tiles++;
-            if (on_progress != nullptr) {
-                env->CallVoidMethod(progress_listener, on_progress,
-                    (jfloat)done_tiles / (jfloat)total_tiles);
+        } else {
+            std::vector<std::thread> workers;
+            for (int t = 0; t < nthr; t++) {
+                workers.emplace_back([&, t]() {
+                    for (int xi = t; xi < xtiles; xi += nthr) {
+                        if (failed_atomic.load()) return;
+                        if (!process_tile(s, (const unsigned char*)in_pixels, w, h, in_stride,
+                                xi, yi, tile_nopad, (unsigned char*)out_pixels, out_stride)) {
+                            __android_log_print(ANDROID_LOG_ERROR, "ReaScaleNcnn",
+                                "tile(%d/%d,%d/%d) 失败", xi, xtiles, yi, ytiles);
+                            failed_atomic = true;
+                            return;
+                        }
+                        done_atomic++;
+                    }
+                });
             }
+            for (auto& wkr : workers) wkr.join();
+        }
+        done_tiles = done_atomic.load();
+        if (on_progress != nullptr) {
+            env->CallVoidMethod(progress_listener, on_progress,
+                (jfloat)done_tiles / (jfloat)total_tiles);
         }
     }
 
     AndroidBitmap_unlockPixels(env, input_bmp);
     AndroidBitmap_unlockPixels(env, output_bmp);
 
-    if (!ok) return JNI_FALSE;
-    __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "process OK: %dx%d → %dx%d (%d tiles)", w, h, w * sc, h * sc, xtiles * ytiles);
+    if (failed_atomic.load()) return JNI_FALSE;
+    __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "process OK: %dx%d → %dx%d (%d tiles, par=%d)", w, h, w * sc, h * sc, xtiles * ytiles, par);
     return JNI_TRUE;
 }
 
