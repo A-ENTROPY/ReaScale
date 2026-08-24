@@ -250,19 +250,23 @@ class ImageProcessor(
                     )
                     return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
                 }
-                // [FIX 2026-08-25] WebP 无流式编码器：超大图自动降级 JPEG（有损质量档一致）
-                OutputFormat.WEBP -> {
-                    LogBus.w("ImageProcessor", "⚠️ WebP 不支持超大图流式输出，已自动改用 JPEG")
+                // [FIX 2026-08-25] WebP/HEIC/HEIF/AVIF 均依赖整图编码器（HeifWriter
+                //   INPUT_MODE_BITMAP / libaom），无流式入口；且硬件 HEVC 编码器普遍有
+                //   分辨率上限（4K-8K），超大图必然失败 → 统一自动降级 JPEG，不再抛错
+                OutputFormat.WEBP,
+                OutputFormat.HEIC,
+                OutputFormat.HEIF,
+                OutputFormat.AVIF -> {
+                    LogBus.w(
+                        "ImageProcessor",
+                        "⚠️ ${job.encodeOptions.format} 不支持超大图流式输出，已自动改用 JPEG"
+                    )
                     val jpegJob = job.copy(encodeOptions = job.encodeOptions.copy(format = OutputFormat.JPEG))
                     processTiledStreamingJpeg(
                         engine, srcUri, srcW, srcH, factor, baseName, jpegJob, progress
                     )
                     return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
                 }
-                else -> throw IllegalStateException(
-                    "输出图片过大（${outPx / 1_000_000}MP ≈ ${outputBitmapBytes / 1024 / 1024}MB）。" +
-                        "该尺寸请把输出格式切换为 JPEG / PNG / JXL（WebP 会自动降级 JPEG）"
-                )
             }
         }
 
