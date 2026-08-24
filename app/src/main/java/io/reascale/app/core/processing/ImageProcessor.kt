@@ -11,11 +11,13 @@ import io.reascale.app.core.TilePlan
 import io.reascale.app.core.engine.UpscaleEngine
 import io.reascale.app.core.engine.UpscaleEngine.Companion.selectPath
 import io.reascale.app.core.engine.UpscalePath
+import io.reascale.app.core.encode.QualityMapper
 import io.reascale.app.core.imageio.ImageProbe
 import io.reascale.app.core.imageio.RegionDecoder
 import io.reascale.app.data.EncodeOptions
 import io.reascale.app.data.EngineProfile
 import io.reascale.app.data.ImageJob
+import io.reascale.app.data.OutputFormat
 import io.reascale.app.debug.LogBus
 
 /**
@@ -39,6 +41,10 @@ class ImageProcessor(
     // [FIX 2026-08-11] 引擎缓存：复用 NcnnEngine 实例避免反复加载模型
     // 同时防止多个引擎实例并发推理导致 ncnn 内部死锁
     private val engineCache = mutableMapOf<String, UpscaleEngine>()
+
+    // [FIX 2026-08-18] 流式 JXL 路径已直接写盘完成，此字段携带最终 Uri（单任务实例）
+    @Volatile
+    private var streamingDoneUri: Uri? = null
 
     /**
      * 处理单个 Job，更新进度 + 最终状态
@@ -106,10 +112,15 @@ class ImageProcessor(
         val baseNameEarly = try { job.sourceDisplayName.substringBeforeLast('.') }
             catch (t: Throwable) { "image" }
         var finalBitmap: Bitmap = try {
-            if (meta.pixelCount > 32_000_000L) {
-                // 超大图：BitmapRegionDecoder 流式分块（外部串行）
+            // [FIX 2026-08-18] 决策改为：输入 >32M 像素 或 输出可能 >200MB bitmap 时
+            // 都走外部分块路径。输出超大的 JXL 由 processTiled 内部转流式编码
+            // （引擎不产出整图输出位图，避免 OOM）。
+            val hugeOutput = meta.width.toLong() * factor * meta.height * factor * 4L >
+                200L * 1024L * 1024L
+            if (meta.pixelCount > 32_000_000L || hugeOutput) {
+                // 超大图：BitmapRegionDecoder 流式分块（外部串行）或流式 JXL 直写
                 val plan = MemoryBudget.planTiles(meta.width, meta.height, context)
-                processTiled(engine, srcUri, meta.width, meta.height, plan, factor, profile, baseNameEarly, progress)
+                processTiled(engine, srcUri, meta.width, meta.height, plan, factor, profile, baseNameEarly, job, progress)
             } else {
                 // 普通图/大图：整图解码 → OnnxEngine 内部并行 tile
                 val src = safeDecodeBitmap(context, srcUri, meta.width, meta.height)
@@ -125,6 +136,11 @@ class ImageProcessor(
             }
         } catch (oom: OutOfMemoryError) {
             throw IllegalStateException("内存不足（OOM），请缩小图片或降低并发数", oom)
+        }
+        // [FIX 2026-08-18] 流式 JXL：超大输出已直接写盘，跳过后续 bitmap 编码路径
+        streamingDoneUri?.let {
+            progress(1.0f)
+            return@runCatching it
         }
         // [FIX 2026-08-16] 确保实际输出尺寸 = 目标放大倍数 × 原图
         // 引擎可能因 CHAIN 非整除（如 3x 模型 target=4）只输出了 baseScale 次方倍，
@@ -193,6 +209,7 @@ class ImageProcessor(
         factor: Int,
         profile: EngineProfile,
         baseName: String,  // 2026-08-08 v8.1: 大图 multi-PNG 需此参数
+        job: ImageJob,
         progress: (Float) -> Unit
     ): Bitmap {
         val outW = srcW * factor
@@ -205,6 +222,17 @@ class ImageProcessor(
         val maxOutputBitmapBytes = 200L * 1024L * 1024L  // 200MB
         val canFitSingleBitmap = outputBitmapBytes <= maxOutputBitmapBytes
 
+        // [FIX 2026-08-18] 超大输出（>200MB bitmap）且格式为 JXL：
+        // 走流式编码（libjxl chunked frame），推理分块输出直接流式编码，
+        // 输出不驻留整图内存，ImageProcessor 返回占位 Bitmap（已直接写入目标）。
+        if (!canFitSingleBitmap && job.encodeOptions.format == OutputFormat.JXL) {
+            processTiledStreamingJxl(
+                engine, srcUri, srcW, srcH, factor, baseName, job, progress
+            )
+            // 占位：process() 检测 streamingDoneUri 后直接返回，不走到尺寸校正
+            return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        }
+
         // [FIX 2026-08-11] 输出 bitmap > 200MB 时抛异常，避免 OOM → native SIGSEGV
         // 超大图可后续走 processTiledMultiPng（v8.1 已实现但输出路径需重构）
         if (!canFitSingleBitmap) {
@@ -216,6 +244,112 @@ class ImageProcessor(
         return processTiledSingleCanvas(
             engine, srcUri, srcW, srcH, plan, factor, outW, outH, progress
         )
+    }
+
+    /**
+     * 流式 JXL：超大输出（bitmap >200MB）不驻留整图。
+     * 外部按无重叠 tile 网格逐个解码→推理，输出行直接流式
+     * 喂入 libjxl（jxl_stream_writer JNI），完成后写 MediaStore/SAF。
+     *
+     * 完成后设置 [streamingDoneUri]，process() 直接返回该 Uri。
+     * 返回 1x1 占位 Bitmap（process() 不会走到尺寸校正分支）。
+     */
+    private suspend fun processTiledStreamingJxl(
+        engine: UpscaleEngine,
+        srcUri: Uri,
+        srcW: Int,
+        srcH: Int,
+        factor: Int,
+        baseName: String,
+        job: ImageJob,
+        progress: (Float) -> Unit
+    ): Bitmap {
+        val outW = srcW * factor
+        val outH = srcH * factor
+        LogBus.i("ImageProcessor", "🟩 streaming-JXL: src=${srcW}x${srcH} → out=${outW}x${outH} (${outW.toLong() * outH}px)")
+
+        // 无重叠 tile 网格（步长限制 512：引擎每块输出位图 + 累加缓冲受控，
+        // 避免单块输出位图 >200MB 再 OOM）
+        val tile = MemoryBudget.maxTileEdge(context).coerceIn(128, 512)
+        val tiles = mutableListOf<Tile>()
+        var ty = 0
+        while (ty < srcH) {
+            val th = (srcH - ty).coerceAtMost(tile)
+            var tx = 0
+            while (tx < srcW) {
+                val tw = (srcW - tx).coerceAtMost(tile)
+                tiles.add(Tile(tx, ty, tw, th))
+                tx += tile
+            }
+            ty += tile
+        }
+        val tileCount = tiles.size.coerceAtLeast(1)
+        LogBus.i("ImageProcessor", "🟩 streaming-JXL tiles=${tileCount} tile=${tile}")
+
+        val displayName = "${baseName}_${factor}x"
+        val quality = QualityMapper.directQuality(job.encodeOptions)
+        val lossless = quality >= 100
+
+        val uri = MediaStoreWriter.writeJxlStreaming(
+            context = context,
+            displayName = displayName,
+            outputDirUri = outputDirProvider(),
+            width = outW,
+            height = outH,
+            quality = quality,
+            lossless = lossless,
+            produce = { feed ->
+                var processed = 0
+                for (t in tiles) {
+                    val rect = android.graphics.Rect(
+                        t.x, t.y,
+                        (t.x + t.w).coerceAtMost(srcW),
+                        (t.y + t.h).coerceAtMost(srcH)
+                    )
+                    val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
+                        ?: throw IllegalStateException("分块解码失败 at $rect")
+                    try {
+                        val upscaled = engine.upscale(
+                            input = tileBmp,
+                            plan = io.reascale.app.data.UpscalePlan(targetScale = factor)
+                        ) { }
+                        try {
+                            val uW = upscaled.width
+                            val uH = upscaled.height
+                            val px = IntArray(uW * uH)
+                            upscaled.getPixels(px, 0, uW, 0, 0, uW, uH)
+                            val row = ByteArray(uW * 3)
+                            val outX = t.x * factor
+                            val outY = t.y * factor
+                            // 行池覆盖语义 = 画布覆盖拼接（后块覆盖重叠区）
+                            for (yy in 0 until uH) {
+                                val base = yy * uW
+                                for (xx in 0 until uW) {
+                                    val p = px[base + xx]
+                                    row[xx * 3] = ((p shr 16) and 0xFF).toByte()
+                                    row[xx * 3 + 1] = ((p shr 8) and 0xFF).toByte()
+                                    row[xx * 3 + 2] = (p and 0xFF).toByte()
+                                }
+                                feed(outY + yy, outX, row)
+                            }
+                        } finally {
+                            if (!upscaled.isRecycled) upscaled.recycle()
+                        }
+                    } finally {
+                        if (!tileBmp.isRecycled) tileBmp.recycle()
+                    }
+                    processed++
+                    progress(0.10f + (processed.toFloat() / tileCount) * 0.82f)
+                }
+            },
+            progress = progress
+        )
+        if (uri == null) {
+            throw IllegalStateException("流式 JXL 输出失败")
+        }
+        streamingDoneUri = uri
+        LogBus.i("ImageProcessor", "✅ streaming-JXL done: $uri")
+        return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
     }
 
     /**

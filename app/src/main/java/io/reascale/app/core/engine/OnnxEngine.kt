@@ -618,17 +618,32 @@ class OnnxEngine(
         if (outW <= 0 || outH <= 0) {
             throw IllegalStateException("固定模型输出尺寸非法: ${inW}x${inH} scale=$sc → ${outW}x$outH")
         }
-        val outBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-        val xtiles = (inW + tile - 1) / tile
-        val ytiles = (inH + tileH - 1) / tileH
+
+        // 50% 重叠步长 → 重叠区域累加平均消除接缝
+        val stepX = (tile / 2).coerceAtLeast(1)
+        val stepY = (tileH / 2).coerceAtLeast(1)
+        val xtiles = ((inW - tile) + stepX - 1) / stepX + 1
+        val ytiles = ((inH - tileH) + stepY - 1) / stepY + 1
         val tileTotal = xtiles * ytiles
+        // 累加缓冲
+        val accR = IntArray(outW * outH)
+        val accG = IntArray(outW * outH)
+        val accB = IntArray(outW * outH)
+        val accW = IntArray(outW * outH)
+
+        val residual = p.residual && profileMean == 0f
+        val m = profileMean
+        val s = profileStd
+        val use255 = p.domain255
+        val inC = p.inC
+        val rw = tile
+        val rh = tileH
         var done = 0
 
         for (ty in 0 until ytiles) {
-            val y0 = ty * tileH
+            val y0 = (ty * stepY).coerceAtMost(inH - 1)
             for (tx in 0 until xtiles) {
-                val x0 = tx * tile
-                // 有效输入区域（无 pad 重叠）
+                val x0 = (tx * stepX).coerceAtMost(inW - 1)
                 val inX0 = x0
                 val inY0 = y0
                 val inX1 = minOf(inW, x0 + tile)
@@ -637,18 +652,14 @@ class OnnxEngine(
                 val validH = inY1 - inY0
                 if (validW <= 0 || validH <= 0) continue
 
-                // 构建 REPLICATE pad 到 exact 模型输入尺寸
-                val rw = tile
-                val rh = tileH
+                // REPLICATE pad 到 128×128
                 val region = IntArray(rw * rh)
-                // 读有效像素填入 region 左上
                 if (validW > 0 && validH > 0) {
                     val tmp = IntArray(validW * validH)
                     input.getPixels(tmp, 0, validW, inX0, inY0, validW, validH)
                     for (yy in 0 until validH) {
                         System.arraycopy(tmp, yy * validW, region, yy * rw, validW)
                     }
-                    // 右侧 pad：复制最后一列
                     val lastCol = validW - 1
                     for (yy in 0 until validH) {
                         val edgePx = region[yy * rw + lastCol]
@@ -656,19 +667,14 @@ class OnnxEngine(
                             region[yy * rw + xx] = edgePx
                         }
                     }
-                    // 下方 pad：复制最后一行
                     val lastRowOff = (validH - 1) * rw
                     for (yy in validH until rh) {
                         System.arraycopy(region, lastRowOff, region, yy * rw, rw)
                     }
                 }
 
-                // 构建 NCHW float 输入（模型固定 NCHW [1,C,tile,tileH]）
-                val inC = p.inC
+                // NCHW float 输入
                 val buf = FloatBuffer.allocate(inC * rh * rw)
-                val m = profileMean
-                val s = profileStd
-                val use255 = p.domain255
                 for (y in 0 until rh) {
                     for (x in 0 until rw) {
                         val px = region[y * rw + x]
@@ -731,65 +737,35 @@ class OnnxEngine(
                     tensor.close()
                 }
 
-                // 回写：输出 = 输入 × scale 精确，从 tensor 左上复制有效区域
+                // 累加写回：整块 512×512 写入输出，重叠区域自动平均
                 val dstX = x0 * sc
                 val dstY = y0 * sc
-                val copyX0 = dstX
-                val copyY0 = dstY
-                val copyX1 = minOf(outW, dstX + tile * sc)
-                val copyY1 = minOf(outH, dstY + tileH * sc)
-                val copyW = copyX1 - copyX0
-                val copyH = copyY1 - copyY0
-                if (copyW <= 0 || copyH <= 0) continue
-                // offX=0：tensor 从 0 开始（整块输出，无 pad 偏移）
-                val offX = 0
-                val offY = 0
-                if (offX + copyW > outTW || offY + copyH > outTH) {
-                    LogBus.w(
-                        "OnnxEngine",
-                        "固定模型 tile 输出越界: off=($offX,$offY) + ($copyW,$copyH) > out=($outTW,$outTH) (tile=$tx,$ty)"
-                    )
-                    continue
-                }
-                val outPixels = IntArray(copyW * copyH)
-                val residual = p.residual && profileMean == 0f
-                val mm = profileMean
-                val ss = profileStd
-                for (oy in 0 until copyH) {
-                    val ty2 = offY + oy
-                    val inY = (copyY0 + oy) / sc
-                    for (ox in 0 until copyW) {
-                        val tx2 = offX + ox
-                        val inX = (copyX0 + ox) / sc
-                        val rv: Double
-                        val gv: Double
-                        val bv: Double
+                for (oy in 0 until outTH) {
+                    val dy = dstY + oy
+                    if (dy >= outH) break
+                    for (ox in 0 until outTW) {
+                        val dx = dstX + ox
+                        if (dx >= outW) break
+                        val rv: Double; val gv: Double; val bv: Double
                         if (outOC == 1) {
-                            // 单通道：平面/交错布局同索引
-                            rv = outData[ty2 * outTW + tx2].toDouble()
-                            gv = rv
-                            bv = rv
+                            rv = outData[oy * outTW + ox].toDouble()
+                            gv = rv; bv = rv
                         } else if (outNchw) {
-                            // NCHW 平面布局：C*H*W 连续块，通道间隔 H*W
                             val stride = outTW * outTH
-                            val base = ty2 * outTW + tx2
+                            val base = oy * outTW + ox
                             rv = outData[base].toDouble()
                             gv = outData[stride + base].toDouble()
                             bv = outData[2 * stride + base].toDouble()
                         } else {
-                            // NHWC 交错布局：每像素 C 个连续值
-                            val oi = (ty2 * outTW + tx2) * outOC
+                            val oi = (oy * outTW + ox) * outOC
                             rv = outData[oi].toDouble()
                             gv = outData[oi + 1].toDouble()
                             bv = outData[oi + 2].toDouble()
                         }
-                        var rr: Double
-                        var gg: Double
-                        var bb: Double
+                        var rr: Double; var gg: Double; var bb: Double
                         if (residual) {
-                            // 残差：输入(0..1) + 残差
-                            val ix = (inX - inX0).coerceIn(0, rw - 1)
-                            val iy = (inY - inY0).coerceIn(0, rh - 1)
+                            val ix = (dx / sc - inX0).coerceIn(0, rw - 1)
+                            val iy = (dy / sc - inY0).coerceIn(0, rh - 1)
                             val ip = region[iy * rw + ix]
                             val ir = ((ip shr 16) and 0xFF) / 255.0
                             val ig = ((ip shr 8) and 0xFF) / 255.0
@@ -798,27 +774,36 @@ class OnnxEngine(
                             gg = if (use255) (ig + gv) / 255.0 else ig + gv
                             bb = if (use255) (ib + bv) / 255.0 else ib + bv
                         } else if (use255) {
-                            rr = rv / 255.0
-                            gg = gv / 255.0
-                            bb = bv / 255.0
+                            rr = rv / 255.0; gg = gv / 255.0; bb = bv / 255.0
                         } else {
-                            rr = rv * ss + mm
-                            gg = gv * ss + mm
-                            bb = bv * ss + mm
+                            rr = rv * s + m; gg = gv * s + m; bb = bv * s + m
                         }
-                        val o = (oy * copyW + ox)
-                        outPixels[o] = (0xFF shl 24) or
-                            (clampByte(rr * 255.0) shl 16) or
-                            (clampByte(gg * 255.0) shl 8) or
-                            clampByte(bb * 255.0)
+                        val idx = dy * outW + dx
+                        accR[idx] += (rr * 255.0).toInt().coerceIn(0, 255)
+                        accG[idx] += (gg * 255.0).toInt().coerceIn(0, 255)
+                        accB[idx] += (bb * 255.0).toInt().coerceIn(0, 255)
+                        accW[idx]++
                     }
                 }
-                outBmp.setPixels(outPixels, 0, copyW, copyX0, copyY0, copyW, copyH)
 
                 done++
                 onTile(done.toFloat() / tileTotal)
             }
         }
+
+        // 归一化
+        val outBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        val finalPx = IntArray(outW * outH)
+        for (i in 0 until outW * outH) {
+            val w = accW[i].coerceAtLeast(1)
+            finalPx[i] = (0xFF shl 24) or
+                ((accR[i] / w).coerceIn(0, 255) shl 16) or
+                ((accG[i] / w).coerceIn(0, 255) shl 8) or
+                (accB[i] / w).coerceIn(0, 255)
+        }
+        outBmp.setPixels(finalPx, 0, outW, 0, 0, outW, outH)
+
+        LogBus.i("OnnxEngine", "✅ 固定模型 tile 完成: ${inW}x${inH} → ${outW}x$outH (${xtiles}x${ytiles} tiles, overlap 50%)")
         return outBmp
     }
 

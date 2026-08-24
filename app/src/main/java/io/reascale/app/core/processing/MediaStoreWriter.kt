@@ -11,8 +11,10 @@ import androidx.annotation.RequiresApi
 import androidx.documentfile.provider.DocumentFile
 import io.reascale.app.data.EncodeOptions
 import io.reascale.app.data.OutputFormat
+import io.reascale.app.core.encode.JxlStreamWriter
 import io.reascale.app.core.encode.QualityMapper
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -265,6 +267,113 @@ object MediaStoreWriter {
             true
         } catch (t: Throwable) {
             false
+        }
+    }
+
+    /**
+     * 流式写入：输出超大 JXL（不驻留整图内存）。
+     * 打开目标流（MediaStore pending / SAF / 旧系统文件），
+     * 由 [writeJxlStream] 分块喂数据。
+     *
+     * @return 终 Uri；null 失败
+     */
+    suspend fun writeJxlStreaming(
+        context: Context,
+        displayName: String,
+        outputDirUri: String?,
+        width: Int,
+        height: Int,
+        quality: Int,
+        lossless: Boolean,
+        produce: suspend (feed: suspend (y: Int, xOff: Int, row: ByteArray) -> Unit) -> Unit,
+        progress: (Float) -> Unit
+    ): Uri? = withContext(Dispatchers.IO) {
+        val ext = "jxl"
+        val mime = "image/jxl"
+        val fileName = "$displayName.$ext"
+        val resolver = context.contentResolver
+
+        // 1. 目标位置
+        val (targetUri, pending) = if (!outputDirUri.isNullOrBlank()) {
+            val tree = DocumentFile.fromTreeUri(context, Uri.parse(outputDirUri)) ?: return@withContext null
+            val file = tree.createFile(mime, fileName) ?: return@withContext null
+            file.uri to false
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$ALBUM_NAME")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values)
+                ?: return@withContext null
+            uri to true
+        } else {
+            val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), ALBUM_NAME).apply { mkdirs() }
+            val outFile = File(dir, fileName)
+            val uri = Uri.fromFile(outFile)
+            uri to false
+        }
+
+        return@withContext try {
+            val out = resolver.openOutputStream(targetUri) ?: return@withContext null
+            val ok = try {
+                val handle = JxlStreamWriter.nativeCreate(width, height, quality, lossless)
+                if (handle == 0L) return@withContext null
+                try {
+                    val encScope = kotlinx.coroutines.CoroutineScope(Dispatchers.Default + kotlinx.coroutines.Job())
+                    val encJob = encScope.async {
+                        val r = JxlStreamWriter.nativeStart(handle)
+                        if (r != 0) throw IllegalStateException("JXL 编码启动失败")
+                    }
+                    produce { y, xOff, row -> JxlStreamWriter.nativeFeedRowAt(handle, y, xOff, row) }
+                    JxlStreamWriter.nativeFinishInput(handle)
+                    encJob.await()
+                    // 追加 extra flush（求稳）
+                    JxlStreamWriter.nativeFlushExtra(handle)
+                    // drain 写流
+                    val buf = ByteArray(64 * 1024)
+                    while (true) {
+                        val n = JxlStreamWriter.nativeDrain(handle, buf, buf.size)
+                        if (n <= 0) break
+                        out.write(buf, 0, n)
+                        progress(0.95f)
+                    }
+                    true
+                } finally {
+                    JxlStreamWriter.nativeDestroy(handle)
+                }
+            } finally {
+                out.close()
+            }
+            if (!ok) {
+                runCatching { resolver.delete(targetUri, null, null) }
+                null
+            } else {
+                if (pending) {
+                    resolver.update(
+                        targetUri,
+                        ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                        null, null
+                    )
+                } else if (targetUri.scheme == "file") {
+                    runCatching {
+                        resolver.insert(
+                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                            ContentValues().apply {
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                                put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                                put(MediaStore.MediaColumns.DATA, targetUri.path)
+                            }
+                        )
+                    }
+                }
+                targetUri
+            }
+        } catch (t: Throwable) {
+            android.util.Log.e("MediaStoreWriter", "writeJxlStreaming failed", t)
+            runCatching { resolver.delete(targetUri, null, null) }
+            null
         }
     }
 

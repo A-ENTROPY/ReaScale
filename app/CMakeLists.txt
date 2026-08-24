@@ -55,3 +55,12 @@ if(EXISTS ${OMP_STATIC})
 else()
     target_link_libraries(reascale_ncnn -lomp)
 endif()
+
+# ===== 流式 JXL 编码器（jxl_stream_writer.cpp）=====
+# [FIX 2026-08-18] dlopen 运行时加载 libjxl.so / libjxl_threads.so（由 jxl-coder AAR 提供），
+# 不静态链接 libjxl；仅链接动态加载所需的基础库。
+add_library(jxl_stream_writer SHARED
+    src/main/cpp/jxl_stream_writer.cpp
+)
+target_compile_features(jxl_stream_writer PRIVATE cxx_std_17)
+target_link_libraries(jxl_stream_writer android log)

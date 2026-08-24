@@ -18,14 +18,22 @@ android {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.3.1-a32"
+        versionCode = 26
+        versionName = "0.3.1-a37"
         vectorDrawables { useSupportLibrary = true }
         // [FIX 2026-08-18] 仪器测试需要显式 runner（androidTest 用）
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    // [FIX 2026-08-18] 流式 JXL 编码器 JNI（dlopen libjxl.so）
+    defaultConfig.externalNativeBuild {
+        cmake {
+            cppFlags += "-std=c++17"
+            targets += listOf("reascale_ncnn", "jxl_stream_writer")
         }
     }
 

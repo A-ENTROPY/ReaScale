@@ -5,18 +5,31 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import io.reascale.app.ReaScaleApp
 import io.reascale.app.core.imageio.PhotoPicker
 import io.reascale.app.data.AppSettings
 import io.reascale.app.ui.theme.ReaScaleTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -31,6 +44,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private var pickImagesLauncher: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>? = null
+    private var filePickerLauncher: androidx.activity.result.ActivityResultLauncher<String>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -89,6 +103,60 @@ class MainActivity : ComponentActivity() {
             Log.e("MainActivity", "register launcher failed", t)
         }
 
+        // 文件管理器选图（ACTION_GET_CONTENT, image/*，原生文件管理器支持全选多选）
+        try {
+            filePickerLauncher = registerForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+            ) { uris ->
+                if (uris.isEmpty()) return@registerForActivityResult
+                // GET_CONTENT URI 无 persistable 权限，复制到内部缓存防丢失
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val fileUris = uris.mapIndexedNotNull { i, uri ->
+                        runCatching {
+                            val mime = contentResolver.getType(uri)
+                            val ext = when {
+                                mime == null -> "jpg"
+                                mime.contains("png", true) -> "png"
+                                mime.contains("webp", true) -> "webp"
+                                else -> "jpg"
+                            }
+                            val dest = java.io.File(cacheDir, "picked/${System.currentTimeMillis()}_$i.$ext").apply {
+                                parentFile?.mkdirs()
+                            }
+                            contentResolver.openInputStream(uri)?.use { input ->
+                                dest.outputStream().use { output -> input.copyTo(output) }
+                            }
+                            android.net.Uri.fromFile(dest)
+                        }.getOrNull().also { if (it == null) Log.w("MainActivity", "copy failed for uri=$i") }
+                    }
+                    if (fileUris.isNotEmpty()) {
+                        try {
+                            val app = ReaScaleApp.get()
+                            val settings = app.settingsRepository.settingsFlow.first()
+                            val engineParams = app.paramsRepository.get(settings.defaultEngineId)
+                            val targetScale = if (engineParams.targetScale.enabled) {
+                                engineParams.targetScale.value
+                            } else {
+                                engineParams.targetScale.effective()
+                            }
+                            handlePickedImages(
+                                context = this@MainActivity,
+                                uris = fileUris,
+                                engineId = settings.defaultEngineId,
+                                targetScale = targetScale,
+                                settings = settings
+                            )
+                        } catch (t: Throwable) {
+                            Log.e("MainActivity", "file picker handler failed", t)
+                        }
+                    }
+                }
+            }
+            Log.i("MainActivity", "file picker launcher registered (GetMultipleContents)")
+        } catch (t: Throwable) {
+            Log.e("MainActivity", "register file picker failed", t)
+        }
+
         setContent {
             // ⚠️ 注意：ReaScaleApp.get() 不在这里直接调，挪到 lambda 里 + try-catch
             // 防止极小概率 instance 未初始化时闪退
@@ -101,6 +169,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
+            var showSourceDialog by remember { mutableStateOf(false) }
 
             ReaScaleTheme(settings = settings) {
                 Surface(
@@ -108,19 +177,49 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     ReaScaleApp(
-                        pickImages = {
-                            try {
-                                Log.i("MainActivity", "launching picker")
-                                pickImagesLauncher?.launch(
-                                    androidx.activity.result.PickVisualMediaRequest(
-                                        androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
-                                    )
-                                ) ?: Log.e("MainActivity", "launcher null!")
-                            } catch (t: Throwable) {
-                                Log.e("MainActivity", "picker launch failed", t)
-                            }
-                        }
+                        pickImages = { showSourceDialog = true }
                     )
+
+                    // 来源选择对话框
+                    if (showSourceDialog) {
+                        AlertDialog(
+                            onDismissRequest = { showSourceDialog = false },
+                            title = { Text("选择图片来源") },
+                            text = { Text("从相册批量选择，或通过文件管理器打开单张图片") },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    showSourceDialog = false
+                                    try {
+                                        pickImagesLauncher?.launch(
+                                            androidx.activity.result.PickVisualMediaRequest(
+                                                androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
+                                            )
+                                        ) ?: Log.e("MainActivity", "launcher null!")
+                                    } catch (t: Throwable) {
+                                        Log.e("MainActivity", "picker launch failed", t)
+                                    }
+                                }) {
+                                    Icon(Icons.Outlined.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.size(4.dp))
+                                    Text("相册")
+                                }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = {
+                                    showSourceDialog = false
+                                    try {
+                                        filePickerLauncher?.launch("image/*")
+                                    } catch (t: Throwable) {
+                                        Log.e("MainActivity", "file picker launch failed", t)
+                                    }
+                                }) {
+                                    Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.size(4.dp))
+                                    Text("文件管理器")
+                                }
+                            }
+                        )
+                    }
                 }
             }
         }
