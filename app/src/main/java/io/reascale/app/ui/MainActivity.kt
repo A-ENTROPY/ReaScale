@@ -44,7 +44,7 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
 
     private var pickImagesLauncher: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>? = null
-    private var filePickerLauncher: androidx.activity.result.ActivityResultLauncher<String>? = null
+    private var filePickerLauncher: androidx.activity.result.ActivityResultLauncher<Array<String>>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,35 +103,26 @@ class MainActivity : ComponentActivity() {
             Log.e("MainActivity", "register launcher failed", t)
         }
 
-        // 文件管理器选图（ACTION_GET_CONTENT, image/*，原生文件管理器支持全选多选）
+                // [FIX 2026-08-25] 文件管理器选图：改用 OpenMultipleDocuments（ACTION_OPEN_DOCUMENT）。
+        // 此前 GetMultipleContents（ACTION_GET_CONTENT）在部分 ROM 被 PhotoPicker 劫持，
+        // 点"文件管理器"实际打开图集。OPEN_DOCUMENT 强制走 DocumentsUI/文件管理器 SAF 界面。
+        // SAF URI 有持久权限 → 无需复制到缓存。
         try {
             filePickerLauncher = registerForActivityResult(
-                androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+                androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
             ) { uris ->
                 if (uris.isEmpty()) return@registerForActivityResult
-                // GET_CONTENT URI 无 persistable 权限，复制到内部缓存防丢失
-                lifecycleScope.launch(Dispatchers.IO) {
-                    val fileUris = uris.mapIndexedNotNull { i, uri ->
-                        runCatching {
-                            val mime = contentResolver.getType(uri)
-                            val ext = when {
-                                mime == null -> "jpg"
-                                mime.contains("png", true) -> "png"
-                                mime.contains("webp", true) -> "webp"
-                                else -> "jpg"
-                            }
-                            val dest = java.io.File(cacheDir, "picked/${System.currentTimeMillis()}_$i.$ext").apply {
-                                parentFile?.mkdirs()
-                            }
-                            contentResolver.openInputStream(uri)?.use { input ->
-                                dest.outputStream().use { output -> input.copyTo(output) }
-                            }
-                            android.net.Uri.fromFile(dest)
-                        }.getOrNull().also { if (it == null) Log.w("MainActivity", "copy failed for uri=$i") }
+                uris.forEach { uri ->
+                    runCatching {
+                        contentResolver.takePersistableUriPermission(
+                            uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        )
                     }
-                    if (fileUris.isNotEmpty()) {
+                }
+                try {
+                    val app = ReaScaleApp.get()
+                    lifecycleScope.launch {
                         try {
-                            val app = ReaScaleApp.get()
                             val settings = app.settingsRepository.settingsFlow.first()
                             val engineParams = app.paramsRepository.get(settings.defaultEngineId)
                             val targetScale = if (engineParams.targetScale.enabled) {
@@ -141,7 +132,7 @@ class MainActivity : ComponentActivity() {
                             }
                             handlePickedImages(
                                 context = this@MainActivity,
-                                uris = fileUris,
+                                uris = uris,
                                 engineId = settings.defaultEngineId,
                                 targetScale = targetScale,
                                 settings = settings
@@ -150,9 +141,11 @@ class MainActivity : ComponentActivity() {
                             Log.e("MainActivity", "file picker handler failed", t)
                         }
                     }
+                } catch (t: Throwable) {
+                    Log.e("MainActivity", "file picker handler outer failed", t)
                 }
             }
-            Log.i("MainActivity", "file picker launcher registered (GetMultipleContents)")
+            Log.i("MainActivity", "file picker launcher registered (OpenMultipleDocuments)")
         } catch (t: Throwable) {
             Log.e("MainActivity", "register file picker failed", t)
         }
@@ -208,7 +201,7 @@ class MainActivity : ComponentActivity() {
                                 TextButton(onClick = {
                                     showSourceDialog = false
                                     try {
-                                        filePickerLauncher?.launch("image/*")
+                                        filePickerLauncher?.launch(arrayOf("image/*"))
                                     } catch (t: Throwable) {
                                         Log.e("MainActivity", "file picker launch failed", t)
                                     }
