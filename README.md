@@ -81,6 +81,24 @@ app/src/main/cpp/
 - 超大图 HEIC/HEIF/AVIF 自动降级 JPEG（硬件编码器有分辨率上限）
 - ONNX 固定尺寸模型的边缘 tile 使用重叠平均，极高频纹理可能有轻微差异
 
+## 致谢与第三方组件
+
+本项目内置/依赖以下开源组件，感谢原作者：
+
+| 组件 | 用途 | 许可 |
+|---|---|---|
+| [ncnn](https://github.com/Tencent/ncnn) | 推理框架 | MIT |
+| [Real-CUGAN](https://github.com/bilibili/Real-CUGAN) | 内置超分模型（models-se/pro/cunet，NCNN 转换版） | MIT |
+| [waifu2x](https://github.com/nagadomi/waifu2x) / [waifu2x-ncnn-vulkan](https://github.com/nihui/waifu2x-ncnn-vulkan) | 内置 upconv_7 系列模型（NCNN 转换版） | MIT |
+| [onnxruntime](https://github.com/microsoft/onnxruntime) | ONNX 推理引擎 | MIT |
+| [libjxl](https://github.com/libjxl/libjxl)（经 [jxl-coder](https://github.com/awxkee/jxl-coder) 集成） | JPEG XL 编解码 | BSD-3-Clause |
+| [avif-coder](https://github.com/awxkee/avif-coder)（libavif + libaom） | AVIF 编码 | 见上游 |
+| [Compose / AndroidX](https://developer.android.com/jetpack/androidx) | UI 框架 | Apache-2.0 |
+
+用户导入的第三方 ONNX 模型版权归各自作者所有，使用时请遵循对应模型的许可条款。
+
 ## License
 
-仅供学习交流，未附许可即保留所有权利。
+本项目代码以 [MIT License](LICENSE) 发布。
+
+内置模型权重分别来自 Real-CUGAN 与 waifu2x（均为 MIT 许可），随应用分发时保留其原始版权声明。
