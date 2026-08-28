@@ -32,6 +32,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         tools:ignore="MissingApplicationIcon"
         android:supportsRtl="true"
+    android:largeHeap="true"
         android:theme="@style/Theme.ReaScale.Splash"
         tools:targetApi="35"
         tools:replace="android:allowBackup">

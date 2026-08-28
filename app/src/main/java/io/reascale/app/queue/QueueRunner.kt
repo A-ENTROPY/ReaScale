@@ -48,6 +48,10 @@ class QueueRunner(
     private val activeWorkers = mutableMapOf<String, Job>()
     // [FIX 2026-08-17] 前台服务状态（"锁屏也跑"）：有活跃任务时启动，空闲时停止
     private var fgServiceStarted = false
+    // [OOM-FIX 2026-08-26] 内存感知调度：活跃 worker 峰值内存总和（MB）
+    private val activePeakMB = java.util.concurrent.atomic.AtomicLong(0L)
+    // heap 预算 = 70% × 可用 heap（largeHeap 后典型 512MB → 预算 ~358MB）
+    private val heapBudgetMB = (Runtime.getRuntime().maxMemory() * 0.7 / 1024L / 1024L).toLong()
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
@@ -143,20 +147,35 @@ class QueueRunner(
                 // [FIX 2026-08-17] 前台服务联动：有活跃任务 → 启动；空闲 → 停止
                 syncForegroundService(settings.enableForegroundService)
 
-                // 取本批 PENDING
-                val pending = queue.dequeuePendingBatch(maxConcurrent - activeWorkers.size)
-
-                if (pending.isEmpty()) {
+                // [OOM-FIX 2026-08-26] 内存感知调度：并发峰值总和 ≤ heap 预算
+                // 每张图（输入解码 + 引擎输出 + tile 缓冲）峰值可达数百 MB，2-3 并发 × 大图
+                // 会突破 heap 上限 → OOM 闪退。调度器按 estimatePeakMB 累计预算，
+                // 内存不够就等待（图片处理是串行降级，任务不丢）。
+                val available = maxConcurrent - activeWorkers.size
+                if (available <= 0) {
+                    delay(300)
+                    continue
+                }
+                val job = queue.peekPending()
+                if (job == null) {
                     delay(500)
                     continue
                 }
-
-                pending.forEach { job ->
-                    val w = runnerScope.launch {
-                        runOneJobSafe(job.id)
-                    }
-                    activeWorkers[job.id] = w
+                val peakMB = io.reascale.app.core.MemoryBudget.estimatePeakMB(job, context)
+                if (activePeakMB.get() + peakMB > heapBudgetMB) {
+                    delay(600)  // 内存不足：等待高占用 worker 释放
+                    continue
                 }
+                activePeakMB.addAndGet(peakMB)
+                val w = runnerScope.launch {
+                    try {
+                        runOneJobSafe(job.id)
+                    } finally {
+                        activePeakMB.addAndGet(-peakMB)
+                        activeWorkers.remove(job.id)
+                    }
+                }
+                activeWorkers[job.id] = w
                 delay(100)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t

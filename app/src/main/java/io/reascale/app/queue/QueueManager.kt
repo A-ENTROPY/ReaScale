@@ -173,6 +173,9 @@ class QueueManager(
         snapshot.filter { it.status == JobStatus.PENDING }.take(n)
     }
 
+    /** [OOM-FIX] 璁嗛樋涓嬩竴涓狤ENDING锛堝彧璇讳笉鍔ㄧ姸鎬侊級 */
+    fun peekPending(): ImageJob? = snapshot.firstOrNull { it.status == JobStatus.PENDING }
+
     /**
      * 更新单个 Job（用 id 匹配）
      * [PERF] 原地替换，不复制全列表
