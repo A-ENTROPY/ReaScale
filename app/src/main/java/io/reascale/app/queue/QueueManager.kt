@@ -1,5 +1,6 @@
 package io.reascale.app.queue
 
+import android.content.Context
 import io.reascale.app.data.ImageJob
 import io.reascale.app.data.JobStatus
 import kotlinx.coroutines.CoroutineScope
@@ -13,10 +14,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import java.io.File
 import java.util.UUID
+import kotlinx.serialization.Serializable
 
 /**
- * 队列管理器（万张级）
+ * 队列管理器（万张级，持久化）
  *
  * [PERF 2026-08-26] 风暴修复（数千张批量导入闪退根因）：
  * - 旧实现：每次 update/markXxx/updateProgress 都 全量 map 复制列表 + 发射 StateFlow。
@@ -28,11 +32,20 @@ import java.util.UUID
  *      → 无论 progress 多高频，UI 最多每秒 2.5 次更新，进度平滑度不受影响
  *   3. 读操作全部走 @Volatile 快照引用（无锁）
  *
+ * [PERSIST 2026-08-26] 系统 SIGKILL 防护（MIUI/Android14 后台冻结杀进程）：
+ * - 进程被杀重启后任务不丢：心跳节流（2s）把队列序列化到 filesDir/queue_jobs.json
+ * - 启动时同步加载；上次遗留 RUNNING 任务重置为 PENDING（重启后继续跑）
+ *
  * M7 升级（占位 TODO）：Room 持久化 / WorkManager / 断点续传
  */
-class QueueManager(private val scope: CoroutineScope) {
+class QueueManager(
+    private val scope: CoroutineScope,
+    context: Context
+) {
 
     private val mutex = Mutex()
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val queueFile = File(context.filesDir, PERSIST_FILE)
 
     /** 权威存储（Mutex 保护，原地修改） */
     private val inner = mutableListOf<ImageJob>()
@@ -46,9 +59,16 @@ class QueueManager(private val scope: CoroutineScope) {
 
     /** 脏标记：有写未发射 */
     private var dirty = false
+
+    private var lastPersistedAt = 0L
     private var flushJob: Job? = null
 
     init {
+        // 启动恢复：上次崩溃/被杀前未完成任务
+        loadFromDisk()
+        // 先立即发布一次恢复快照（不等心跳）
+        _jobs.value = snapshot
+
         flushJob = scope.launch(Dispatchers.Default) {
             while (true) {
                 delay(FLUSH_INTERVAL_MS)
@@ -58,12 +78,65 @@ class QueueManager(private val scope: CoroutineScope) {
                         snapshot = inner.toList()
                         _jobs.value = snapshot
                     }
+                    // 写盘节流 2s：过程被杀也不丢任务
+                    val now = System.currentTimeMillis()
+                    if (now - lastPersistedAt >= DISK_INTERVAL_MS) {
+                        lastPersistedAt = now
+                        persistLocked()
+                    }
                 }
             }
         }
     }
 
-    /** [INTERNAL] 立即发射一次快照（进度精确性要求高的场景可手动调用） */
+    /** 启动时从磁盘恢复（同步，万级 JSON 解析 <100ms） */
+    private fun loadFromDisk() {
+        runCatching {
+            if (!queueFile.exists()) return
+            val decoded = json.decodeFromString(QueueEnvelope.serializer(), queueFile.readText()).jobs
+            if (decoded.isEmpty()) return
+            // 悬空 RUNNING → PENDING（进程被杀重启后自动续跑）
+            val now = System.currentTimeMillis()
+            for (j in decoded) {
+                inner.add(
+                    if (j.status == JobStatus.RUNNING) {
+                        j.copy(status = JobStatus.PENDING, startedAt = 0L, progress = 0f, lastError = if (j.lastError.isEmpty()) "" else j.lastError)
+                    } else j
+                )
+            }
+            snapshot = inner.toList()
+        }.onFailure {
+            android.util.Log.e("QueueManager", "恢复队列失败（忽略）", it)
+        }
+    }
+
+    /** 写盘（调用方需持有 mutex） */
+    private fun persistLocked() {
+        runCatching {
+            queueFile.parentFile?.mkdirs()
+            val tmp = File(queueFile.parentFile, "$PERSIST_FILE.tmp")
+            tmp.writeText(json.encodeToString(QueueEnvelope.serializer(), QueueEnvelope(inner.toList())))
+            if (tmp.exists()) {
+                val bak = File(queueFile.parentFile, "$PERSIST_FILE.bak")
+                if (queueFile.exists()) {
+                    // 先备份旧的（新文件写坏时能回滚）
+                    if (bak.exists()) bak.delete()
+                    queueFile.copyTo(bak, overwrite = true)
+                }
+                if (tmp.renameTo(queueFile)) {
+                    bak.delete()
+                } else {
+                    // rename 失败：直接覆盖（tmp 内容已完整）
+                    tmp.copyTo(queueFile, overwrite = true)
+                    tmp.delete()
+                }
+            }
+        }.onFailure {
+            android.util.Log.e("QueueManager", "持久化队列失败（忽略）", it)
+        }
+    }
+
+    /** 立即发射一次快照（进度精确性要求高的场景可手动调用） */
     suspend fun flushNow() = withContext(Dispatchers.Default) {
         mutex.withLock {
             dirty = false
@@ -179,9 +252,7 @@ class QueueManager(private val scope: CoroutineScope) {
     suspend fun updateProgress(id: String, progress: Float) = mutate { list ->
         val idx = list.indexOfFirst { it.id == id }
         if (idx >= 0) {
-            val p = progress.coerceIn(0f, 1f)
-            // 变化 < 0.5% 且相差 < 100ms 仍合并进心跳（无需单独判定——心跳自然节流）
-            list[idx] = list[idx].copy(progress = p)
+            list[idx] = list[idx].copy(progress = progress.coerceIn(0f, 1f))
         }
     }
 
@@ -232,7 +303,12 @@ class QueueManager(private val scope: CoroutineScope) {
     /** 单条读取 */
     fun findById(id: String): ImageJob? = snapshot.firstOrNull { it.id == id }
 
+    @Serializable
+    private data class QueueEnvelope(val jobs: List<ImageJob>)
+
     companion object {
         private const val FLUSH_INTERVAL_MS = 400L
+        private const val DISK_INTERVAL_MS = 2000L
+        private const val PERSIST_FILE = "queue_jobs.json"
     }
 }

@@ -39,8 +39,8 @@ class ReaScaleApp : Application() {
     /** 全局设置仓储（单例） */
     val settingsRepository: SettingsRepository by lazy { SettingsRepository(this) }
 
-    /** 队列管理器（单例，M1 内存版） */
-    val queueManager: QueueManager by lazy { QueueManager(appScope) }
+    /** 队列管理器（单例，持久化版——进程被杀重启后任务不丢） */
+    val queueManager: QueueManager by lazy { QueueManager(appScope, this) }
 
     /**
      * 图像处理流水线（优先真 ONNX 推理，缺模型回退到 StubEngine）
