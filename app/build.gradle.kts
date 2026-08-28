@@ -14,12 +14,25 @@ android {
     compileSdk = 36
     ndkVersion = "27.0.12077973"
 
+    // [FIX 2026-08-26] 发布签名：密钥库在仓库根 keystore/ 目录（已 gitignore，不入库）
+    signingConfigs {
+        create("release") {
+            storeFile = file("../keystore/reascale-release.jks")
+            storePassword = "ReaScale2026!"
+            keyAlias = "reascale"
+            keyPassword = "ReaScale2026!"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    }
+
     defaultConfig {
         applicationId = "io.reascale.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 35
-        versionName = "0.3.1-a48"
+        versionCode = 36
+        versionName = "0.3.1-a49"
         vectorDrawables { useSupportLibrary = true }
         // [FIX 2026-08-18] 仪器测试需要显式 runner（androidTest 用）
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -45,6 +58,8 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // 发布签名：本地 keystore（不入库）
+            signingConfig = signingConfigs.getByName("release")
         }
         debug {
             applicationIdSuffix = ".debug"

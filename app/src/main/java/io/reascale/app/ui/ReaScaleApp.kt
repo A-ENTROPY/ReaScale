@@ -171,37 +171,44 @@ fun handlePickedImages(
         val scope = app.appScope
         scope.launch(Dispatchers.IO) {
             try {
-                val jobs = uris.mapNotNull { uri ->
-                    try {
-                        val meta = ImageProbe.probe(context, uri) ?: return@mapNotNull null
-                        val displayName = runCatching {
-                            context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                                if (c.moveToFirst()) {
-                                    val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                                    if (idx >= 0) c.getString(idx) else null
-                                } else null
-                            }
-                        }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "image"
-                        ImageJob(
-                            id = "",
-                            sourceUri = uri.toString(),
-                            sourceDisplayName = displayName,
-                            sourceSizeBytes = meta.fileSizeBytes,
-                            sourceWidth = meta.width,
-                            sourceHeight = meta.height,
-                            engineId = engineId,
-                            upscalePlan = UpscalePlan(targetScale = targetScale),
-                            // [FIX 2026-08-17] 使用设置页配置的默认格式/质量
-                            // （原固定 EncodeOptions()，设置页的默认格式/质量形同虚设）
-                            encodeOptions = settings.encodeOptions
-                        )
-                    } catch (t: Throwable) {
-                        android.util.Log.w("handlePickedImages", "skip uri=$uri", t)
-                        null
+                // [PERF 2026-08-26] 分批 probe+入队（每批 128）：先探明的先入队显示，
+                // 避免大选择集一次性全部 probe（慢）后才入队；每批入队一次原子快照。
+                fun buildJob(uri: Uri): ImageJob? = try {
+                    val meta = ImageProbe.probe(context, uri) ?: return null
+                    val displayName = runCatching {
+                        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+                            if (c.moveToFirst()) {
+                                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                                if (idx >= 0) c.getString(idx) else null
+                            } else null
+                        }
+                    }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "image"
+                    ImageJob(
+                        id = "",
+                        sourceUri = uri.toString(),
+                        sourceDisplayName = displayName,
+                        sourceSizeBytes = meta.fileSizeBytes,
+                        sourceWidth = meta.width,
+                        sourceHeight = meta.height,
+                        engineId = engineId,
+                        upscalePlan = UpscalePlan(targetScale = targetScale),
+                        encodeOptions = settings.encodeOptions
+                    )
+                } catch (t: Throwable) {
+                    android.util.Log.w("handlePickedImages", "skip uri=$uri", t)
+                    null
+                }
+
+                val batch = mutableListOf<ImageJob>()
+                for (uri in uris) {
+                    buildJob(uri)?.let { batch.add(it) }
+                    if (batch.size >= BATCH_SIZE) {
+                        app.queueManager.enqueueAll(batch.toList())
+                        batch.clear()
                     }
                 }
-                if (jobs.isNotEmpty()) {
-                    app.queueManager.enqueueAll(jobs)
+                if (batch.isNotEmpty()) {
+                    app.queueManager.enqueueAll(batch.toList())
                 }
             } catch (t: Throwable) {
                 android.util.Log.e("handlePickedImages", "batch failed", t)
@@ -211,3 +218,5 @@ fun handlePickedImages(
         android.util.Log.e("handlePickedImages", "launch failed", t)
     }
 }
+
+private const val BATCH_SIZE = 128

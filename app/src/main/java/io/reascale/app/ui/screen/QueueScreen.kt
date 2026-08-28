@@ -35,6 +35,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +50,14 @@ import io.reascale.app.data.ImageJob
 import io.reascale.app.data.JobStatus
 import io.reascale.app.ui.theme.Spacing
 import kotlinx.coroutines.launch
+
+/** [PERF 2026-08-26] 单次遍历分组结果 */
+private class JobGroups(
+    val running: List<ImageJob>,
+    val pending: List<ImageJob>,
+    val done: List<ImageJob>,
+    val failed: List<ImageJob>
+)
 
 /**
  * 队列页（§30.8.6）
@@ -70,10 +79,26 @@ fun QueueScreen(
     val app = ReaScaleApp.get()
     val scope = rememberCoroutineScope()
 
-    val running = list.filter { it.status == JobStatus.RUNNING }
-    val pending = list.filter { it.status == JobStatus.PENDING }
-    val done = list.filter { it.status == JobStatus.COMPLETED }
-    val failed = list.filter { it.status == JobStatus.FAILED || it.status == JobStatus.CANCELLED }
+    // [PERF 2026-08-26] 单次遍历分组（旧实现 4 次全量 filter，万张时每次发射 4×N）
+    val groups = remember(list) {
+        val running = mutableListOf<ImageJob>()
+        val pending = mutableListOf<ImageJob>()
+        val done = mutableListOf<ImageJob>()
+        val failed = mutableListOf<ImageJob>()
+        for (j in list) {
+            when (j.status) {
+                JobStatus.RUNNING -> running.add(j)
+                JobStatus.PENDING -> pending.add(j)
+                JobStatus.COMPLETED -> done.add(j)
+                else -> failed.add(j)
+            }
+        }
+        JobGroups(running, pending, done, failed)
+    }
+    val running = groups.running
+    val pending = groups.pending
+    val done = groups.done
+    val failed = groups.failed
     val isRunnerRunning by app.queueRunner.isRunning.collectAsStateWithLifecycle()
 
     Scaffold(
@@ -123,22 +148,22 @@ fun QueueScreen(
 
             if (running.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_running), running.size) }
-                items(running) { j -> RunningJobCard(j, onCancel = { id -> app.queueRunner.cancelJob(id) }) }
+                items(running, key = { it.id }) { j -> RunningJobCard(j, onCancel = { id -> app.queueRunner.cancelJob(id) }) }
             }
 
             if (pending.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_pending), pending.size) }
-                items(pending) { j -> PendingJobCard(j) }
+                items(pending, key = { it.id }) { j -> PendingJobCard(j) }
             }
 
             if (done.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_completed), done.size) }
-                items(done) { j -> DoneJobCard(j) }
+                items(done, key = { it.id }) { j -> DoneJobCard(j) }
             }
 
             if (failed.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_failed), failed.size) }
-                items(failed) { j -> FailedJobCard(j) }
+                items(failed, key = { it.id }) { j -> FailedJobCard(j) }
             }
 
             item { Spacer(Modifier.height(Spacing.md)) }

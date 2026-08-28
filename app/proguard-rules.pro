@@ -14,3 +14,16 @@
 # NCNNï¼ˆé¢„ç•™ï¼‰
 -keep class com.tencent.ncnn.** { *; }
 -dontwarn com.tencent.ncnn.**
+# [FIX 2026-08-26] JNI£ºnative ·½·¨ÃûÓë C++ JNI ·ûºÅ°ó¶¨£¬½ûÖ¹»ìÏý/°þÀë
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+-keep class io.reascale.app.core.engine.ReascaleNcnn { *; }
+-keep class io.reascale.app.core.engine.ReascaleNcnn { *; }
+-keep class io.reascale.app.core.encode.JxlStreamWriter { *; }
+-keep class io.reascale.app.core.engine.NcnnEngine { *; }
+-keep class io.reascale.app.core.engine.OnnxEngine { *; }
+# libjxl / jxl-coder / avif-coder
+-keep class com.awxkee.jxlcoder.** { *; }
+-keep class com.radzivon.bartoshyk.avif.coder.** { *; }
+-keep class androidx.heifwriter.** { *; }
