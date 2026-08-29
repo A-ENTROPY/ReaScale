@@ -26,6 +26,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.DeleteForever
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
@@ -164,14 +167,22 @@ fun QueueScreen(
 
             if (running.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_running), running.size) }
-                items(running, key = { it.id }) { j -> RunningJobCard(j, onCancel = { id -> app.queueRunner.cancelJob(id) }) }
+                items(running, key = { it.id }) { j ->
+                    RunningJobCard(
+                        j,
+                        onCancel = { id -> app.queueRunner.cancelJob(id) },
+                        onRemove = { id -> scope.launch { app.queueManager.remove(id) } }
+                    )
+                }
             }
 
             if (pending.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_pending), pending.size) }
                 // [OOM-FIX 2026-08-29] 超大队列（数千张）：每组最多渲染 RENDER_LIMIT 项，
                 // 其余用计数行代替——LazyColumn 虚拟化只省布局，Compose 仍对全量 diff/分配
-                items(pending.take(RENDER_LIMIT), key = { it.id }) { j -> PendingJobCard(j) }
+                items(pending.take(RENDER_LIMIT), key = { it.id }) { j ->
+                    PendingJobCard(j, onRemove = { id -> scope.launch { app.queueManager.remove(id) } })
+                }
                 if (pending.size > RENDER_LIMIT) {
                     item { Text("… 还有 ${pending.size - RENDER_LIMIT} 个等待中", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
@@ -180,7 +191,9 @@ fun QueueScreen(
             if (done.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_completed), done.size) }
                 val recent = done.take(RENDER_LIMIT)
-                items(recent, key = { it.id }) { j -> DoneJobCard(j) }
+                items(recent, key = { it.id }) { j ->
+                    DoneJobCard(j, onRemove = { id -> scope.launch { app.queueManager.remove(id) } })
+                }
                 if (done.size > RENDER_LIMIT) {
                     item { Text("… 已完成 ${done.size - RENDER_LIMIT} 个已折叠", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
@@ -188,7 +201,13 @@ fun QueueScreen(
 
             if (failed.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_failed), failed.size) }
-                items(failed.take(RENDER_LIMIT), key = { it.id }) { j -> FailedJobCard(j) }
+                items(failed.take(RENDER_LIMIT), key = { it.id }) { j ->
+                    FailedJobCard(
+                        j,
+                        onRetry = { id -> scope.launch { app.queueManager.retry(id) } },
+                        onRemove = { id -> scope.launch { app.queueManager.remove(id) } }
+                    )
+                }
                 if (failed.size > RENDER_LIMIT) {
                     item { Text("… 还有 ${failed.size - RENDER_LIMIT} 个失败已折叠", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 }
@@ -207,7 +226,8 @@ fun QueueScreen(
                         app.setProcessingEnabled(true)
                         app.queueRunner.start()
                     },
-                    onClear = { scope.launch { app.queueManager.clearFinished() } }
+                    onClear = { scope.launch { app.queueManager.clearFinished() } },
+                    onClearAll = { scope.launch { app.queueManager.clearAll() } }
                 )
             }
 
@@ -319,7 +339,7 @@ private fun SectionHeader(title: String, count: Int) {
 }
 
 @Composable
-private fun RunningJobCard(j: ImageJob, onCancel: (String) -> Unit) {
+private fun RunningJobCard(j: ImageJob, onCancel: (String) -> Unit, onRemove: (String) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
@@ -346,6 +366,9 @@ private fun RunningJobCard(j: ImageJob, onCancel: (String) -> Unit) {
                 IconButton(onClick = { onCancel(j.id) }) {
                     Icon(Icons.Outlined.Stop, contentDescription = "停止")
                 }
+                IconButton(onClick = { onRemove(j.id) }) {
+                    Icon(Icons.Outlined.Close, contentDescription = "移除")
+                }
             }
             Spacer(Modifier.height(Spacing.xs))
             LinearProgressIndicator(
@@ -366,7 +389,7 @@ private fun RunningJobCard(j: ImageJob, onCancel: (String) -> Unit) {
 }
 
 @Composable
-private fun PendingJobCard(j: ImageJob) {
+private fun PendingJobCard(j: ImageJob, onRemove: (String) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
@@ -390,12 +413,15 @@ private fun PendingJobCard(j: ImageJob) {
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            IconButton(onClick = { onRemove(j.id) }) {
+                Icon(Icons.Outlined.Close, contentDescription = "移除", modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun DoneJobCard(j: ImageJob) {
+private fun DoneJobCard(j: ImageJob, onRemove: (String) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable { /* TODO: 打开输出图 */ },
         shape = MaterialTheme.shapes.medium,
@@ -415,12 +441,15 @@ private fun DoneJobCard(j: ImageJob) {
                 Text(j.sourceDisplayName, style = MaterialTheme.typography.bodyMedium)
             }
             Text("✓", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.tertiary)
+            IconButton(onClick = { onRemove(j.id) }) {
+                Icon(Icons.Outlined.Close, contentDescription = "移除", modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun FailedJobCard(j: ImageJob) {
+private fun FailedJobCard(j: ImageJob, onRetry: (String) -> Unit, onRemove: (String) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
@@ -445,6 +474,12 @@ private fun FailedJobCard(j: ImageJob) {
                     )
                 }
             }
+            IconButton(onClick = { onRetry(j.id) }) {
+                Icon(Icons.Outlined.Refresh, contentDescription = "重试", modifier = Modifier.size(18.dp))
+            }
+            IconButton(onClick = { onRemove(j.id) }) {
+                Icon(Icons.Outlined.Close, contentDescription = "移除", modifier = Modifier.size(18.dp))
+            }
         }
     }
 }
@@ -464,7 +499,8 @@ private fun GlobalActions(
     canStart: Boolean,
     onPause: () -> Unit,
     onStart: () -> Unit,
-    onClear: () -> Unit
+    onClear: () -> Unit,
+    onClearAll: () -> Unit
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.sm), modifier = Modifier.fillMaxWidth()) {
         if (canPause) {
@@ -484,6 +520,11 @@ private fun GlobalActions(
             Icon(Icons.Outlined.DeleteSweep, contentDescription = null)
             Spacer(Modifier.size(Spacing.xs))
             Text(stringResource(R.string.queue_clear_done), style = MaterialTheme.typography.labelSmall)
+        }
+        FilledTonalButton(onClick = onClearAll, modifier = Modifier.weight(1f)) {
+            Icon(Icons.Outlined.DeleteForever, contentDescription = null)
+            Spacer(Modifier.size(Spacing.xs))
+            Text("清空队列", style = MaterialTheme.typography.labelSmall)
         }
     }
 }

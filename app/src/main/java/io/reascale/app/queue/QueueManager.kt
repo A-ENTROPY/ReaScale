@@ -220,6 +220,38 @@ class QueueManager(
         }
     }
 
+    /** [UX-FIX 2026-08-29] 移除单个任务（任意状态） */
+    suspend fun remove(id: String) = mutate { list ->
+        list.removeAll { it.id == id }
+    }
+
+    /** [UX-FIX 2026-08-29] 清空整个队列（全部状态） */
+    suspend fun clearAll() = mutate { list -> list.clear() }
+
+    /**
+     * [UX-FIX 2026-08-29] 重试任务：FAILED/CANCELLED → PENDING
+     */
+    suspend fun retry(id: String): Boolean = withContext(Dispatchers.Default) {
+        var ok = false
+        mutate { list ->
+            val idx = list.indexOfFirst { it.id == id }
+            if (idx >= 0) {
+                val st = list[idx].status
+                if (st == JobStatus.FAILED || st == JobStatus.CANCELLED) {
+                    ok = true
+                    list[idx] = list[idx].copy(
+                        status = JobStatus.PENDING,
+                        progress = 0f,
+                        retryCount = list[idx].retryCount + 1,
+                        lastError = "",
+                        finishedAt = 0L
+                    )
+                }
+            }
+        }
+        ok
+    }
+
     /** 统计（读快照） */
     fun countBy(status: JobStatus): Int {
         var c = 0
