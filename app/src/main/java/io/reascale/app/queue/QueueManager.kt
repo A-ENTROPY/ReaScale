@@ -64,10 +64,17 @@ class QueueManager(
     private var flushJob: Job? = null
 
     init {
-        // 启动恢复：上次崩溃/被杀前未完成任务
-        loadFromDisk()
-        // 先立即发布一次恢复快照（不等心跳）
-        _jobs.value = snapshot
+        // [CRASH-FIX 2026-08-29] 恢复队列改后台线程：
+        // 同步主线程解析大 JSON 阻塞启动 → startForegroundService 5s 超时被杀
+        // （ForegroundServiceDidNotStartInTimeException）
+        scope.launch(Dispatchers.IO) {
+            loadFromDisk()
+            mutex.withLock {
+                dirty = true
+                snapshot = inner.toList()
+                _jobs.value = snapshot
+            }
+        }
 
         flushJob = scope.launch(Dispatchers.Default) {
             while (true) {

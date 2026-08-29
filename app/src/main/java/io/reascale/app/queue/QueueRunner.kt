@@ -52,6 +52,8 @@ class QueueRunner(
     private val activePeakMB = java.util.concurrent.atomic.AtomicLong(0L)
     // heap 预算 = 70% × 可用 heap（largeHeap 后典型 512MB → 预算 ~358MB）
     private val heapBudgetMB = (Runtime.getRuntime().maxMemory() * 0.7 / 1024L / 1024L).toLong()
+    // [CRASH-FIX 2026-08-29] 前台服务启动冷却
+    private var schedulerStartedAt = 0L
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
@@ -59,6 +61,9 @@ class QueueRunner(
     /** 启动调度循环（幂等） */
     fun start() {
         if (schedulerJob?.isActive == true) return
+        // [CRASH-FIX 2026-08-29] 启动冷却：Application 初始化窗口内不启动前台服务，
+        // 避免 startForegroundService 5s 超时被杀（ForegroundServiceDidNotStartInTimeException）
+        schedulerStartedAt = System.currentTimeMillis()
         schedulerJob = runnerScope.launch {
             _isRunning.value = true
             try {
@@ -102,7 +107,10 @@ class QueueRunner(
      */
     private fun syncForegroundService(enabled: Boolean) {
         val hasActive = activeWorkers.isNotEmpty()
-        if (enabled && hasActive && !fgServiceStarted) {
+        // [CRASH-FIX 2026-08-29] 启动冷却：进程刚冷启 1.5s 内不启动前台服务
+        // （Application 初始化 + 队列恢复窗口，服务 5s 超时会被系统杀进程）
+        val cold = System.currentTimeMillis() - schedulerStartedAt < FG_START_COOLDOWN_MS
+        if (enabled && hasActive && !fgServiceStarted && !cold) {
             try {
                 context.startForegroundService(
                     android.content.Intent(context, io.reascale.app.service.ProcessingForegroundService::class.java)
@@ -242,5 +250,9 @@ class QueueRunner(
             queue.markFailed(jobId, t.message ?: "未知异常")
             android.util.Log.e("QueueRunner", "runOneJob failed", t)
         }
+    }
+
+    companion object {
+        private const val FG_START_COOLDOWN_MS = 1500L
     }
 }
