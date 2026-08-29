@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -322,6 +323,33 @@ class MainActivity : ComponentActivity() {
                                     Spacer(Modifier.size(4.dp))
                                     Text("文件管理器")
                                 }
+                            }
+                        )
+                    }
+
+                    // [KILL-LOOP-FIX 2026-08-29] 被杀循环引导（系统反复清理后台进程）
+                    var showKillGuide by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) {
+                        runCatching {
+                            if (ReaScaleApp.get().killLoopDetected) showKillGuide = true
+                        }
+                    }
+                    if (showKillGuide) {
+                        AlertDialog(
+                            onDismissRequest = { showKillGuide = false },
+                            title = { Text("系统正在反复清理 ReaScale") },
+                            text = {
+                                Text(
+                                    "检测到手机系统在清理本应用进程（常见于 MIUI/ZUI 省电策略）。\n\n" +
+                                        "请按以下步骤让批量处理稳定运行（一次设置永久生效）：\n" +
+                                        "1. 打开最近任务，向下拉住 ReaScale 卡片（出现锁图标 🔒）\n" +
+                                        "2. 设置 → 应用 → ReaScale → 后台运行权限：允许\n" +
+                                        "3. 设置 → 省电与电池 → ReaScale → 无限制\n\n" +
+                                        "设置后未完成的任务仍会自动恢复（系统调度兜底已开启）。"
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = { showKillGuide = false }) { Text("知道了") }
                             }
                         )
                     }

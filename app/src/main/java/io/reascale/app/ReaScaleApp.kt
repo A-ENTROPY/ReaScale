@@ -92,9 +92,29 @@ class ReaScaleApp : Application() {
     @Volatile private var _ready: Boolean = false
     val isReady: Boolean get() = _ready
 
+    /** [KILL-LOOP-FIX] 是否处于"被杀循环"（2 分钟内被系统反复杀重启）→ UI 弹引导 */
+    @Volatile
+    var killLoopDetected: Boolean = false
+        private set
+
+    /** 被杀循环检测（Application.onCreate 首部调用后置真） */
+    fun markKillLoopIfRecent(detected: Boolean) {
+        if (detected) killLoopDetected = true
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
+
+        // [KILL-LOOP-FIX 2026-08-29] 检测"被杀循环"（系统 2 分钟内连续杀重启同进程）
+        // → 引导用户做厂商侧豁免（后台运行/锁定/自启动），否则开发者侧无解
+        val stats = getSharedPreferences("crash_stats", MODE_PRIVATE)
+        val lastStart = stats.getLong("last_start", 0L)
+        val now = System.currentTimeMillis()
+        stats.edit().putLong("last_start", now).apply()
+        val killedRecently = now - lastStart < 120_000L
+        markKillLoopIfRecent(killedRecently)
+        LogBus.i("ReaScaleApp", "启动间隔=${(now - lastStart) / 1000}s killedRecently=$killedRecently")
 
         // === 初始化日志总线（必须在所有日志之前）===
         LogBus.setSinkDir(java.io.File(filesDir, "debug_logs"))
