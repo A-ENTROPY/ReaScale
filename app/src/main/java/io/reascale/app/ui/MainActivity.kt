@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.items
@@ -224,6 +225,11 @@ class MainActivity : ComponentActivity() {
             val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
             var showSourceDialog by remember { mutableStateOf(false) }
             var showFmPickerDialog by remember { mutableStateOf(false) }
+            // [BATCH-FIX 2026-08-29] 文件夹扫描状态
+            var showFolderInputDialog by remember { mutableStateOf(false) }
+            var folderScanPath by remember { mutableStateOf("") }
+            var folderScanBusy by remember { mutableStateOf(false) }
+            var folderScanResult by remember { mutableStateOf("") }
 
             // 查询第三方文件管理器（排除系统 DocumentsUI / PhotoPicker）
             fun queryFileManagers(): List<android.content.pm.ResolveInfo> {
@@ -275,7 +281,49 @@ class MainActivity : ComponentActivity() {
                         AlertDialog(
                             onDismissRequest = { showSourceDialog = false },
                             title = { Text("选择图片来源") },
-                            text = { Text("从相册批量选择，或通过文件管理器打开单张图片") },
+                            text = {
+                                androidx.compose.foundation.layout.Column {
+                                    Text(
+                                        "批量来源：",
+                                        style = MaterialTheme.typography.labelMedium
+                                    )
+                                    Spacer(Modifier.height(4.dp))
+                                    // 扫描文件夹（推荐）：app 内 MediaStore 扫描，无系统选择器
+                                    TextButton(onClick = {
+                                        showSourceDialog = false
+                                        showFolderInputDialog = true
+                                    }) {
+                                        Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.size(4.dp))
+                                        Text("扫描文件夹（目录路径，推荐）")
+                                    }
+                                    TextButton(onClick = {
+                                        showSourceDialog = false
+                                        val fms = queryFileManagers()
+                                        if (fms.isEmpty()) {
+                                            // 无第三方文件管理器：回退 SAF
+                                            try {
+                                                startKeepAlive()
+                                                filePickerLauncher?.launch(
+                                                    android.content.Intent(
+                                                        android.content.Intent.ACTION_OPEN_DOCUMENT
+                                                    ).apply {
+                                                        type = "image/*"
+                                                        putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
+                                                    }
+                                                )
+                                            } catch (t: Throwable) {
+                                                Log.e("MainActivity", "saf fallback failed", t)
+                                            }
+                                        } else {
+                                            fmCandidates = fms
+                                            showFmPickerDialog = true
+                                        }
+                                    }) {
+                                        Text("文件管理器（第三方选择器）")
+                                    }
+                                }
+                            },
                             confirmButton = {
                                 TextButton(onClick = {
                                     showSourceDialog = false
@@ -296,33 +344,82 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             dismissButton = {
-                                TextButton(onClick = {
-                                    showSourceDialog = false
-                                    val fms = queryFileManagers()
-                                    if (fms.isEmpty()) {
-                                        // 无第三方文件管理器：回退 SAF
-                                        try {
-                                            startKeepAlive()
-                                            filePickerLauncher?.launch(
-                                                android.content.Intent(
-                                                    android.content.Intent.ACTION_OPEN_DOCUMENT
-                                                ).apply {
-                                                    type = "image/*"
-                                                    putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true)
-                                                }
-                                            )
-                                        } catch (t: Throwable) {
-                                            Log.e("MainActivity", "saf fallback failed", t)
-                                        }
-                                    } else {
-                                        fmCandidates = fms
-                                        showFmPickerDialog = true
+                                TextButton(onClick = { showSourceDialog = false }) { Text("取消") }
+                            }
+                        )
+                    }
+
+                    // [BATCH-FIX 2026-08-29] 文件夹扫描输入框（app 内扫描，无系统选择器）
+                    if (showFolderInputDialog) {
+                        AlertDialog(
+                            onDismissRequest = { if (!folderScanBusy) showFolderInputDialog = false },
+                            title = { Text("扫描文件夹") },
+                            text = {
+                                androidx.compose.foundation.layout.Column {
+                                    Text(
+                                        "输入图片目录路径（含子目录）：\n举例 /storage/emulated/0/DCIM/Camera\n留空 = 扫描全部图片",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    androidx.compose.material3.OutlinedTextField(
+                                        value = folderScanPath,
+                                        onValueChange = { folderScanPath = it },
+                                        placeholder = { Text("/storage/emulated/0/DCIM/Camera") },
+                                        singleLine = true,
+                                        modifier = Modifier.fillMaxWidth()
+                                    )
+                                    if (folderScanResult.isNotEmpty()) {
+                                        Spacer(Modifier.height(8.dp))
+                                        Text(folderScanResult, style = MaterialTheme.typography.bodySmall)
                                     }
-                                }) {
-                                    Icon(Icons.Outlined.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.size(4.dp))
-                                    Text("文件管理器")
                                 }
+                            },
+                            confirmButton = {
+                                TextButton(
+                                    onClick = {
+                                        if (folderScanBusy) return@TextButton
+                                        folderScanBusy = true
+                                        folderScanResult = "扫描中…"
+                                        val path = folderScanPath
+                                        val scope = lifecycleScope
+                                        scope.launch(Dispatchers.IO) {
+                                            try {
+                                                val result = io.reascale.app.core.imageio.FolderScanner.scanImages(
+                                                    this@MainActivity, path
+                                                )
+                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                    folderScanResult = "找到 ${result.uris.size} 张图片，正在入队…"
+                                                }
+                                                if (result.uris.isNotEmpty()) {
+                                                    handlePickedImages(
+                                                        context = this@MainActivity,
+                                                        uris = result.uris,
+                                                        engineId = ReaScaleApp.get().settingsRepository.settingsFlow.first().defaultEngineId,
+                                                        targetScale = ReaScaleApp.get().settingsRepository.settingsFlow.first().let {
+                                                            val ep = ReaScaleApp.get().paramsRepository.get(it.defaultEngineId)
+                                                            if (ep.targetScale.enabled) ep.targetScale.value else ep.targetScale.effective()
+                                                        },
+                                                        settings = ReaScaleApp.get().settingsRepository.settingsFlow.first()
+                                                    )
+                                                }
+                                            } catch (t: Throwable) {
+                                                Log.e("MainActivity", "folder scan failed", t)
+                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                    folderScanResult = "扫描失败: ${t.message}"
+                                                }
+                                            } finally {
+                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                    folderScanBusy = false
+                                                    showFolderInputDialog = false
+                                                }
+                                            }
+                                        }
+                                    },
+                                    enabled = !folderScanBusy
+                                ) { Text(if (folderScanBusy) "扫描中…" else "扫描并入队") }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { if (!folderScanBusy) showFolderInputDialog = false }) { Text("取消") }
                             }
                         )
                     }
