@@ -49,6 +49,24 @@ import kotlinx.coroutines.launch
  */
 class MainActivity : ComponentActivity() {
 
+    // [CRASH-FIX 2026-08-29] 选图保活：点选图前启动前台服务（前台时刻合法），返回后停止。
+    // 防止数千张选图期间进程退后台被系统 SIGKILL。
+    fun startKeepAlive() {
+        runCatching {
+            startForegroundService(
+                android.content.Intent(this, io.reascale.app.service.KeepAliveService::class.java)
+            )
+        }.onFailure { Log.e("MainActivity", "keepalive start failed", it) }
+    }
+
+    fun stopKeepAlive() {
+        runCatching {
+            stopService(
+                android.content.Intent(this, io.reascale.app.service.KeepAliveService::class.java)
+            )
+        }
+    }
+
     private var pickImagesLauncher: androidx.activity.result.ActivityResultLauncher<androidx.activity.result.PickVisualMediaRequest>? = null
     // [FIX 2026-08-25] 文件管理器：显式调起用户安装的第三方文件管理器 app
     // （GET_CONTENT 在 ColorOS 被 PhotoPicker 劫持、SAF DocumentsUI 限制多）
@@ -80,6 +98,7 @@ class MainActivity : ComponentActivity() {
                 )
             ) { uris ->
                 Log.i("MainActivity", "picker result: ${uris.size} uris")
+                stopKeepAlive()
                 if (uris.isEmpty()) return@registerForActivityResult
                 try {
                     val app = ReaScaleApp.get()
@@ -133,6 +152,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 if (uris.isEmpty()) return@registerForActivityResult
+                stopKeepAlive()
                 // 第三方管理器返回的 URI 是临时读权限：复制到内部缓存防丢失
                 lifecycleScope.launch(Dispatchers.IO) {
                     val fileUris = uris.mapIndexedNotNull { i, uri ->
@@ -216,6 +236,7 @@ class MainActivity : ComponentActivity() {
                 }.distinctBy { it.activityInfo.packageName }
             }
 
+            // [CRASH-FIX 2026-08-29] 选图前启动保活前台服务（成员方法 startKeepAlive/stopKeepAlive）
             fun launchFileManager(ri: android.content.pm.ResolveInfo) {
                 val intent = android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).apply {
                     type = "image/*"
@@ -224,6 +245,7 @@ class MainActivity : ComponentActivity() {
                     setClassName(ri.activityInfo.packageName, ri.activityInfo.name)
                 }
                 try {
+                    startKeepAlive()
                     filePickerLauncher?.launch(intent)
                 } catch (t: Throwable) {
                     Log.e("MainActivity", "launch fm failed: ${ri.activityInfo.packageName}", t)
@@ -249,6 +271,7 @@ class MainActivity : ComponentActivity() {
                                 TextButton(onClick = {
                                     showSourceDialog = false
                                     try {
+                                        startKeepAlive()
                                         pickImagesLauncher?.launch(
                                             androidx.activity.result.PickVisualMediaRequest(
                                                 androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia.ImageOnly
@@ -270,6 +293,7 @@ class MainActivity : ComponentActivity() {
                                     if (fms.isEmpty()) {
                                         // 无第三方文件管理器：回退 SAF
                                         try {
+                                            startKeepAlive()
                                             filePickerLauncher?.launch(
                                                 android.content.Intent(
                                                     android.content.Intent.ACTION_OPEN_DOCUMENT

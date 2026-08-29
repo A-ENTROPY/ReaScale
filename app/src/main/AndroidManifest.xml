@@ -55,6 +55,9 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <service
+        android:name=".service.KeepAliveService"
+        android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>
