@@ -36,6 +36,12 @@ import kotlinx.coroutines.coroutineScope
  * 5. Bitmap.compress + MediaStoreWriter 写盘
  * 6. 返回 output Uri + 耗时
  */
+/** [THRESHOLD-FIX] 整图路径 Bitmap 内存预算：180MB ≈ 4500 万输出像素（搜证：WebP 16383px / HEVC 8K / AV1 8192） */
+private const val WHOLE_IMAGE_BITMAP_BUDGET_BYTES = 180L * 1024L * 1024L
+
+/** [THRESHOLD-FIX] HEIC/HEIF/AVIF 编码器边长上限（HEVC 硬件 8K 级 / libaom 实用 8192） */
+private const val ENCODER_EDGE_LIMIT = 8192L
+
 class ImageProcessor(
     private val context: Context,
     private val engineProvider: (String) -> UpscaleEngine,
@@ -116,13 +122,22 @@ class ImageProcessor(
         val baseNameEarly = try { job.sourceDisplayName.substringBeforeLast('.') }
             catch (t: Throwable) { "image" }
         var finalBitmap: Bitmap = try {
-            // [OOM-FIX 2026-08-29] 入口同样降阈值：输出 >32MB 就直接走 processTiled（流式 tile 推理），
-            // 避免整图解码（48MB）+ 引擎整图输出（192MB）的高峰叠加。
-            // 整图路径只留给 ≤800 万输出像素的小图（单张峰值 <100MB）。
+            // [THRESHOLD-FIX 2026-08-29] 整图路径内存阈值（搜证后重设）：
+            // - WebP(libwebp) 最大 16383px 边；HEVC 硬件编码器 8K 级（8192 边）；
+            //   AV1/libaom 实用上限 8192 边；JPEG/PNG 无实用上限（流式兜底）
+            // - 输出 ≤ 180MB bitmap（≈4500 万像素 ≈ 8192×5500）：WebP 总能编；
+            //   HEIC/HEIF/AVIF 需再按 8192 边长校验（下方 forceStreaming）
+            // - >180MB 输出：JXL/PNG/JPEG 走流式；其余格式降级 JPEG（流式）
             val hugeOutput = meta.width.toLong() * factor * meta.height * factor * 4L >
-                32L * 1024L * 1024L
-            if (meta.pixelCount > 32_000_000L || hugeOutput) {
-                // 超大图：BitmapRegionDecoder 流式分块（外部串行）或流式 JXL 直写
+                WHOLE_IMAGE_BITMAP_BUDGET_BYTES
+            // [THRESHOLD-FIX] HEIC/HEIF/AVIF 依赖硬件 HEVC / libaom：边长超 8192（8K）必失败 → 强制降级流式
+            val fmt = job.encodeOptions.format
+            val overEncoderLimit = (fmt == io.reascale.app.data.OutputFormat.HEIC ||
+                fmt == io.reascale.app.data.OutputFormat.HEIF ||
+                fmt == io.reascale.app.data.OutputFormat.AVIF) &&
+                (meta.width.toLong() * factor > ENCODER_EDGE_LIMIT || meta.height.toLong() * factor > ENCODER_EDGE_LIMIT)
+            if (meta.pixelCount > 32_000_000L || hugeOutput || overEncoderLimit) {
+                // 超大图 / 超出编码器限制：BitmapRegionDecoder 流式分块 + 流式/降级写出
                 val plan = MemoryBudget.planTiles(meta.width, meta.height, context)
                 processTiled(engine, srcUri, meta.width, meta.height, plan, factor, profile, baseNameEarly, job, progress)
             } else {
@@ -224,14 +239,13 @@ class ImageProcessor(
         // === v8 决策：output bitmap 大小 vs heap ===
         // [OOM-FIX 2026-08-29] 整图路径阈值 200MB → 32MB：40MP 输出 Bitmap(native) 192MB +
         // 输入解码 48MB + NCNN 中间缓冲 = 单张 300-400MB 峰值；2-3 并发即 1GB+ 高峰 →
-        // 系统（MIUI SmartPower / LMKD）判定内存压力强杀后台进程。
-        // 降到 32MB（800 万输出像素）：≥2MP 源图的 2x/4x 全部强制走流式 tile 路径——
-        // tile 级推理 + 流式编码，单张峰值 ~60MB，2-3 并发 ~150MB，慢速但低内存不死。
+        // [THRESHOLD-FIX 2026-08-29] 整图 vs 流式阈值：输出 ≤180MB bitmap（≈4500 万像素）走整图
+        // （WebP 16383px / HEVC 8K / AV1 8192 均覆盖，见 process() 注释）；超出走流式/降级。
         val outputBitmapBytes = outPx * 4L
-        val maxOutputBitmapBytes = 32L * 1024L * 1024L  // 32MB 输出 = 800 万像素
+        val maxOutputBitmapBytes = WHOLE_IMAGE_BITMAP_BUDGET_BYTES
         val canFitSingleBitmap = outputBitmapBytes <= maxOutputBitmapBytes
 
-        // [FIX 2026-08-18] 超大输出（>200MB bitmap）：
+        // [FIX 2026-08-18] 超大输出（>180MB bitmap）：
         // JXL → libjxl 流式编码；PNG → 纯 Kotlin StreamingPngWriter；
         // 其他格式暂不支持流式，明确报错并给出建议。
         if (!canFitSingleBitmap) {
