@@ -1,5 +1,6 @@
 package io.reascale.app.ui
 
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -73,8 +74,14 @@ class MainActivity : ComponentActivity() {
     // [FIX 2026-08-25] 文件管理器：显式调起用户安装的第三方文件管理器 app
     // （GET_CONTENT 在 ColorOS 被 PhotoPicker 劫持、SAF DocumentsUI 限制多）
     private var filePickerLauncher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>? = null
+    // [BATCH-FIX 2026-08-29] 文件夹选择器（SAF tree）
+    private var treePickerLauncher: androidx.activity.result.ActivityResultLauncher<Uri?>? = null
     // 待启动的第三方文件管理器列表（点"文件管理器"后填充，弹选择框）
     private var fmCandidates by androidx.compose.runtime.mutableStateOf<List<android.content.pm.ResolveInfo>>(emptyList())
+    // [BATCH-FIX 2026-08-29] 文件夹扫描状态（类成员：treePicker 回调与 Compose 共用）
+    private var showFolderInputDialog by androidx.compose.runtime.mutableStateOf(false)
+    private var folderScanBusy by androidx.compose.runtime.mutableStateOf(false)
+    private var folderScanResult by androidx.compose.runtime.mutableStateOf("")
 
     /** [CRASH-FIX 2026-08-29] 返回前台（含选图返回）重置软启动窗口，摊平处理峰值 */
     override fun onResume() {
@@ -140,6 +147,62 @@ class MainActivity : ComponentActivity() {
             Log.i("MainActivity", "launcher registered")
         } catch (t: Throwable) {
             Log.e("MainActivity", "register launcher failed", t)
+        }
+
+        // [BATCH-FIX 2026-08-29] 文件夹选择器（SAF tree 一次性授权，之后 app 内扫描）
+        try {
+            treePickerLauncher = registerForActivityResult(
+                androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()
+            ) { treeUri ->
+                stopKeepAlive()
+                if (treeUri == null) return@registerForActivityResult
+                try {
+                    contentResolver.takePersistableUriPermission(
+                        treeUri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    )
+                } catch (t: Throwable) {
+                    Log.w("MainActivity", "takePersistableUriPermission failed", t)
+                }
+                lifecycleScope.launch {
+                    val settingsNow = runCatching {
+                        ReaScaleApp.get().settingsRepository.settingsFlow.first()
+                    }.getOrNull()
+                    val engineId = settingsNow?.defaultEngineId ?: "builtin_realesrgan_x2plus"
+                    val targetScale = settingsNow?.let { s ->
+                        val ep = runCatching { ReaScaleApp.get().paramsRepository.get(s.defaultEngineId) }.getOrNull()
+                        val ts = ep?.targetScale
+                        if (ts != null && ts.enabled) ts.value else ts?.effective()
+                    } ?: 4
+                    folderScanBusy = true
+                    folderScanResult = "正在扫描…"
+                    try {
+                        val uris = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                            io.reascale.app.core.imageio.FolderScanner.scanTree(this@MainActivity, treeUri)
+                        }
+                        folderScanResult = "找到 ${uris.size} 张图片，正在入队…"
+                        if (uris.isNotEmpty()) {
+                            handlePickedImages(
+                                context = this@MainActivity,
+                                uris = uris,
+                                engineId = engineId,
+                                targetScale = targetScale,
+                                settings = settingsNow ?: io.reascale.app.data.AppSettings()
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        Log.e("MainActivity", "tree scan failed", t)
+                        folderScanResult = "扫描失败: ${t.message}"
+                    } finally {
+                        folderScanBusy = false
+                        folderScanResult = ""
+                        showFolderInputDialog = false
+                    }
+                }
+            }
+            Log.i("MainActivity", "tree picker launcher registered")
+        } catch (t: Throwable) {
+            Log.e("MainActivity", "register tree picker failed", t)
         }
 
                 // [FIX 2026-08-25] 文件管理器：通用 StartActivityForResult launcher。
@@ -225,11 +288,6 @@ class MainActivity : ComponentActivity() {
             val settings by settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
             var showSourceDialog by remember { mutableStateOf(false) }
             var showFmPickerDialog by remember { mutableStateOf(false) }
-            // [BATCH-FIX 2026-08-29] 文件夹扫描状态
-            var showFolderInputDialog by remember { mutableStateOf(false) }
-            var folderScanPath by remember { mutableStateOf("") }
-            var folderScanBusy by remember { mutableStateOf(false) }
-            var folderScanResult by remember { mutableStateOf("") }
 
             // 查询第三方文件管理器（排除系统 DocumentsUI / PhotoPicker）
             fun queryFileManagers(): List<android.content.pm.ResolveInfo> {
@@ -357,67 +415,29 @@ class MainActivity : ComponentActivity() {
                             text = {
                                 androidx.compose.foundation.layout.Column {
                                     Text(
-                                        "输入图片目录路径（含子目录）：\n举例 /storage/emulated/0/DCIM/Camera\n留空 = 扫描全部图片",
+                                        "点击下方按钮选择图片文件夹（系统文件夹选择器，含子目录递归）。\n" +
+                                            "授权一次后扫描与处理全程在应用内进行。",
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Spacer(Modifier.height(8.dp))
-                                    androidx.compose.material3.OutlinedTextField(
-                                        value = folderScanPath,
-                                        onValueChange = { folderScanPath = it },
-                                        placeholder = { Text("/storage/emulated/0/DCIM/Camera") },
-                                        singleLine = true,
-                                        modifier = Modifier.fillMaxWidth()
-                                    )
+                                    TextButton(
+                                        onClick = {
+                                            if (folderScanBusy) return@TextButton
+                                            showFolderInputDialog = false
+                                            startKeepAlive()
+                                            treePickerLauncher?.launch(null)
+                                        },
+                                        enabled = !folderScanBusy
+                                    ) {
+                                        Text("选择文件夹…")
+                                    }
                                     if (folderScanResult.isNotEmpty()) {
                                         Spacer(Modifier.height(8.dp))
                                         Text(folderScanResult, style = MaterialTheme.typography.bodySmall)
                                     }
                                 }
                             },
-                            confirmButton = {
-                                TextButton(
-                                    onClick = {
-                                        if (folderScanBusy) return@TextButton
-                                        folderScanBusy = true
-                                        folderScanResult = "扫描中…"
-                                        val path = folderScanPath
-                                        val scope = lifecycleScope
-                                        scope.launch(Dispatchers.IO) {
-                                            try {
-                                                val result = io.reascale.app.core.imageio.FolderScanner.scanImages(
-                                                    this@MainActivity, path
-                                                )
-                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                                    folderScanResult = "找到 ${result.uris.size} 张图片，正在入队…"
-                                                }
-                                                if (result.uris.isNotEmpty()) {
-                                                    handlePickedImages(
-                                                        context = this@MainActivity,
-                                                        uris = result.uris,
-                                                        engineId = ReaScaleApp.get().settingsRepository.settingsFlow.first().defaultEngineId,
-                                                        targetScale = ReaScaleApp.get().settingsRepository.settingsFlow.first().let {
-                                                            val ep = ReaScaleApp.get().paramsRepository.get(it.defaultEngineId)
-                                                            if (ep.targetScale.enabled) ep.targetScale.value else ep.targetScale.effective()
-                                                        },
-                                                        settings = ReaScaleApp.get().settingsRepository.settingsFlow.first()
-                                                    )
-                                                }
-                                            } catch (t: Throwable) {
-                                                Log.e("MainActivity", "folder scan failed", t)
-                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                                    folderScanResult = "扫描失败: ${t.message}"
-                                                }
-                                            } finally {
-                                                kotlinx.coroutines.withContext(Dispatchers.Main) {
-                                                    folderScanBusy = false
-                                                    showFolderInputDialog = false
-                                                }
-                                            }
-                                        }
-                                    },
-                                    enabled = !folderScanBusy
-                                ) { Text(if (folderScanBusy) "扫描中…" else "扫描并入队") }
-                            },
+                            confirmButton = {},
                             dismissButton = {
                                 TextButton(onClick = { if (!folderScanBusy) showFolderInputDialog = false }) { Text("取消") }
                             }
