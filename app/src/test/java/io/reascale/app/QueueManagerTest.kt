@@ -14,9 +14,8 @@ import org.junit.Test
 
 /**
  * 队列状态机单测
- * [FIX 2026-08-17] markRunning/markCompleted/markFailed 增加状态守卫：
- * - cancel 后 worker 收尾不能把 CANCELLED 覆盖回 COMPLETED/FAILED（任务复活）
- * - 已取消的任务不能重新进入 RUNNING
+ * [FIX 2026-08-17] markRunning/markCompleted/markFailed 增加状态守卫
+ * [FIX 2026-08-29] 心跳快照：断言前调用 flushNow() 冲刷（生产由 400ms 心跳节流发射）
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class QueueManagerTest {
@@ -39,8 +38,8 @@ class QueueManagerTest {
         qm.enqueue(job("a"))
         qm.markRunning("a")
         assertTrue(qm.cancel("a"))
-        // worker 收尾尝试写完成 —— 状态守卫应拦截
         qm.markCompleted("a", "content://out/1")
+        qm.flushNow()
         assertEquals(JobStatus.CANCELLED, qm.jobs.value.single().status)
     }
 
@@ -51,6 +50,7 @@ class QueueManagerTest {
         qm.markRunning("a")
         qm.cancel("a")
         qm.markFailed("a", "late error")
+        qm.flushNow()
         assertEquals(JobStatus.CANCELLED, qm.jobs.value.single().status)
     }
 
@@ -59,8 +59,9 @@ class QueueManagerTest {
         val qm = QueueManager(backgroundScope)
         qm.enqueue(job("a"))
         qm.cancel("a")
-        // 任务已取消，worker 不应再把它置为 RUNNING
+        qm.flushNow()
         assertFalse(qm.markRunning("a"))
+        qm.flushNow()
         assertEquals(JobStatus.CANCELLED, qm.jobs.value.single().status)
     }
 
@@ -70,6 +71,7 @@ class QueueManagerTest {
         qm.enqueue(job("a"))
         assertTrue(qm.markRunning("a"))
         assertTrue(qm.markCompleted("a", "content://out/1"))
+        qm.flushNow()
         assertEquals(JobStatus.COMPLETED, qm.jobs.value.single().status)
     }
 
@@ -77,8 +79,8 @@ class QueueManagerTest {
     fun `fail before running is allowed`() = runTest {
         val qm = QueueManager(backgroundScope)
         qm.enqueue(job("a"))
-        // 引擎不存在等启动前失败：PENDING → FAILED
         qm.markFailed("a", "引擎不存在")
+        qm.flushNow()
         assertEquals(JobStatus.FAILED, qm.jobs.value.single().status)
     }
 
@@ -88,7 +90,9 @@ class QueueManagerTest {
         qm.enqueue(job("a"))
         qm.markRunning("a")
         qm.markCompleted("a", "uri")
+        qm.flushNow()
         assertFalse(qm.cancel("a"))
+        qm.flushNow()
         assertEquals(JobStatus.COMPLETED, qm.jobs.value.single().status)
     }
 
@@ -96,9 +100,9 @@ class QueueManagerTest {
     fun `dequeue returns pending in fifo order`() = runTest {
         val qm = QueueManager(backgroundScope)
         qm.enqueueAll(listOf(job("a"), job("b"), job("c")))
+        qm.flushNow()
         val batch = qm.dequeuePendingBatch(2)
         assertEquals(listOf("a", "b"), batch.map { it.id })
-        // 状态仍为 PENDING（RUNNING 由 worker 在真正开始时标记）
         assertEquals(3, qm.countBy(JobStatus.PENDING))
     }
 
@@ -110,6 +114,30 @@ class QueueManagerTest {
         qm.markCompleted("a", "uri1")
         qm.markFailed("b", "err")
         qm.clearFinished()
+        qm.flushNow()
+        assertEquals(0, qm.jobs.value.size)
+    }
+
+    @Test
+    fun `retry moves failed back to pending`() = runTest {
+        val qm = QueueManager(backgroundScope)
+        qm.enqueue(job("a"))
+        qm.markFailed("a", "boom")
+        assertTrue(qm.retry("a"))
+        qm.flushNow()
+        val j = qm.jobs.value.single()
+        assertEquals(JobStatus.PENDING, j.status)
+        assertEquals(1, j.retryCount)
+        assertEquals("", j.lastError)
+    }
+
+    @Test
+    fun `remove and clearAll`() = runTest {
+        val qm = QueueManager(backgroundScope)
+        qm.enqueueAll(listOf(job("a"), job("b"), job("c")))
+        qm.remove("b")
+        qm.clearAll()
+        qm.flushNow()
         assertEquals(0, qm.jobs.value.size)
     }
 }

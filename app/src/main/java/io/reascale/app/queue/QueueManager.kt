@@ -40,12 +40,12 @@ import kotlinx.serialization.Serializable
  */
 class QueueManager(
     private val scope: CoroutineScope,
-    context: Context
+    context: Context? = null
 ) {
 
     private val mutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    private val queueFile = File(context.filesDir, PERSIST_FILE)
+    private val queueFile: File? = context?.let { File(it.filesDir, PERSIST_FILE) }
 
     /** 权威存储（Mutex 保护，原地修改） */
     private val inner = mutableListOf<ImageJob>()
@@ -99,8 +99,9 @@ class QueueManager(
     /** 启动时从磁盘恢复（同步，万级 JSON 解析 <100ms） */
     private fun loadFromDisk() {
         runCatching {
-            if (!queueFile.exists()) return
-            val decoded = json.decodeFromString(QueueEnvelope.serializer(), queueFile.readText()).jobs
+            val qf = queueFile ?: return
+            if (!qf.exists()) return
+            val decoded = json.decodeFromString(QueueEnvelope.serializer(), qf.readText()).jobs
             if (decoded.isEmpty()) return
             // 悬空 RUNNING → PENDING（进程被杀重启后自动续跑）
             val now = System.currentTimeMillis()
@@ -120,21 +121,22 @@ class QueueManager(
     /** 写盘（调用方需持有 mutex） */
     private fun persistLocked() {
         runCatching {
-            queueFile.parentFile?.mkdirs()
-            val tmp = File(queueFile.parentFile, "$PERSIST_FILE.tmp")
+            val qf = queueFile ?: return
+            qf.parentFile?.mkdirs()
+            val tmp = File(qf.parentFile, "$PERSIST_FILE.tmp")
             tmp.writeText(json.encodeToString(QueueEnvelope.serializer(), QueueEnvelope(inner.toList())))
             if (tmp.exists()) {
-                val bak = File(queueFile.parentFile, "$PERSIST_FILE.bak")
-                if (queueFile.exists()) {
+                val bak = File(qf.parentFile, "$PERSIST_FILE.bak")
+                if (qf.exists()) {
                     // 先备份旧的（新文件写坏时能回滚）
                     if (bak.exists()) bak.delete()
-                    queueFile.copyTo(bak, overwrite = true)
+                    qf.copyTo(bak, overwrite = true)
                 }
-                if (tmp.renameTo(queueFile)) {
+                if (tmp.renameTo(qf)) {
                     bak.delete()
                 } else {
                     // rename 失败：直接覆盖（tmp 内容已完整）
-                    tmp.copyTo(queueFile, overwrite = true)
+                    tmp.copyTo(qf, overwrite = true)
                     tmp.delete()
                 }
             }
@@ -192,12 +194,20 @@ class QueueManager(
         if (idx >= 0) list[idx] = job
     }
 
-    /** 取消任务（仅非终态可取消；正在执行的 worker 由 QueueRunner 负责取消） */
-    suspend fun cancel(id: String): Boolean {
-        val target = snapshot.firstOrNull { it.id == id } ?: return false
-        if (target.status == JobStatus.COMPLETED || target.status == JobStatus.FAILED) return false
-        update(target.copy(status = JobStatus.CANCELLED, finishedAt = System.currentTimeMillis()))
-        return true
+    /** 取消任务（仅非终态可取消；正在执行的 worker 由 QueueRunner 负责取消）[实时性：锁内查询] */
+    suspend fun cancel(id: String): Boolean = withContext(Dispatchers.Default) {
+        var ok = false
+        mutate { list ->
+            val idx = list.indexOfFirst { it.id == id }
+            if (idx >= 0) {
+                val st = list[idx].status
+                if (st != JobStatus.COMPLETED && st != JobStatus.FAILED) {
+                    ok = true
+                    list[idx] = list[idx].copy(status = JobStatus.CANCELLED, finishedAt = System.currentTimeMillis())
+                }
+            }
+        }
+        ok
     }
 
     /** 移除已完成/已失败/已取消的 */

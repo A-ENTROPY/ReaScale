@@ -131,14 +131,15 @@ class StreamingJpegWriter(
         val px = mcuX * 8
         for (i in 0 until 64) work[i] = 0f
         for (yy in 0 until 8) {
+            // [FIX 2026-08-29] 右边缘不足 8 像素的块必须复制边缘像素填充（JPEG MCU 要求完整 8x8），
+            // 之前 break 直接留黑 → 非 8 倍数宽度照片右侧出现竖条色偏伪影
+            val rb = rowBuf[yy]
             for (xx in 0 until 8) {
                 val sx = px + xx
-                if (sx >= width) break
-                val o = sx * 3
-
-                val r = rowBuf[yy][o].toInt() and 0xFF
-                val g = rowBuf[yy][o + 1].toInt() and 0xFF
-                val b = rowBuf[yy][o + 2].toInt() and 0xFF
+                val o = (if (sx >= width) width - 1 else sx) * 3
+                val r = rb[o].toInt() and 0xFF
+                val g = rb[o + 1].toInt() and 0xFF
+                val b = rb[o + 2].toInt() and 0xFF
                 work[yy * 8 + xx] = when (comp) {
                     0 -> 0.299f * r + 0.587f * g + 0.114f * b - 128f
                     1 -> -0.168736f * r - 0.331264f * g + 0.5f * b

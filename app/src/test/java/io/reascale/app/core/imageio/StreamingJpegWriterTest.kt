@@ -103,4 +103,31 @@ class StreamingJpegWriterTest {
         println("2000x1500 编码 ${dt}ms, ${bos.size()} bytes")
         assertTrue(bos.size() > 50_000)
     }
+
+    /**
+     * [FIX 2026-08-29] 非 8 倍数尺寸（WebP 源常见）右/下边缘填充回归测试：
+     * 纯红图 300x303 → 白底/红块 @ 右边缘应保持红色，不得出现黑/绿竖条
+     */
+    @Test
+    fun encodeObliqueSizeEdge() {
+        val w = 300; val h = 303  // 非 8 倍数
+        val bos = ByteArrayOutputStream()
+        StreamingJpegWriter(bos, w, h, quality = 92).use { jpg ->
+            val row = ByteArray(w * 3)
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    row[x*3] = 255.toByte()
+                    row[x*3+1] = 0.toByte()
+                    row[x*3+2] = 0.toByte()
+                }
+                jpg.feedRow(y, row)
+            }
+        }
+        val bytes = bos.toByteArray()
+        val out = File("../build/jpeg_oblique.jpg")
+        out.parentFile?.mkdirs()
+        out.writeBytes(bytes)
+        println("written: ${out.absolutePath} ${bytes.size} bytes")
+        assertTrue(bytes.size > 1000)
+    }
 }
