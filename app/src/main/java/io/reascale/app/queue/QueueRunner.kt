@@ -166,17 +166,6 @@ class QueueRunner(
                 // 清理已完成的 worker 引用
                 activeWorkers.entries.removeAll { !it.value.isActive }
 
-                // [WATCHDOG-FIX 2026-08-29] 停滞任务看门狗：RUNNING 且超过 STALL_TIMEOUT 无任何
-                // 进度更新（引擎死锁/卡死）→ 标记失败并释放并发位，后续任务继续处理
-                // （原行为：卡死任务永久占满并发槽 → 队列"停摆"，其余任务永远等待）
-                val nowMs = System.currentTimeMillis()
-                val stalledId = queue.stalledJobId(nowMs)
-                if (stalledId != null) {
-                    activeWorkers.remove(stalledId)?.cancel()
-                    queue.markFailed(stalledId, "处理超时（>${STALL_TIMEOUT_MS / 1000 / 60} 分钟无进度）")
-                    android.util.Log.w("QueueRunner", "watchdog killed stalled job $stalledId")
-                }
-
                 // [FIX 2026-08-17] 前台服务联动：有活跃任务 → 启动；空闲 → 停止
                 syncForegroundService(settings.enableForegroundService)
 
@@ -343,9 +332,6 @@ class QueueRunner(
     companion object {
         private const val FG_START_COOLDOWN_MS = 1500L
         private const val SOFT_START_WINDOW_MS = 15_000L
-
-        /** [WATCHDOG-FIX] 停滞判定：RUNNING 任务超过该时长无进度更新视为卡死 */
-        private const val STALL_TIMEOUT_MS = 20L * 60L * 1000L
 
         /** [RELIABILITY-FIX] 失败自动重试次数上限 */
         private const val MAX_AUTO_RETRY = 2
