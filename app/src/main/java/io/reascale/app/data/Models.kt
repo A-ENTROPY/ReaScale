@@ -147,7 +147,8 @@ data class EncodeOptions(
 enum class ConcurrencyProfile {
     @SerialName("saver") SAVER,     // 省电：1-2 线程，温和
     @SerialName("balanced") BALANCED, // 平衡：2-3 线程
-    @SerialName("performance") PERFORMANCE // 性能：3-4 线程 + Vulkan
+    @SerialName("performance") PERFORMANCE, // 性能：3 线程
+    @SerialName("ultra") ULTRA // 极速：4 线程
 }
 
 /**

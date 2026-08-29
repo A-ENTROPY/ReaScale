@@ -160,6 +160,7 @@ class QueueRunner(
                     ConcurrencyProfile.SAVER -> 1
                     ConcurrencyProfile.BALANCED -> 2
                     ConcurrencyProfile.PERFORMANCE -> 3
+                    ConcurrencyProfile.ULTRA -> 4
                 }
 
                 // 清理已完成的 worker 引用

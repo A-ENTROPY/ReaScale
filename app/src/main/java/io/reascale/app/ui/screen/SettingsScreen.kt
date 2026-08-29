@@ -522,7 +522,7 @@ private fun ConcurrencySelector(
                     fontWeight = FontWeight.Medium
                 )
                 Text(
-                    text = "同时处理的图片数量（影响发热与速度）",
+                    text = "同时处理的图片数量（并行数：1-4 张；越多越快，发热/内存占用越高）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -531,10 +531,11 @@ private fun ConcurrencySelector(
         Spacer(Modifier.height(Spacing.sm))
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
             val options = listOf(
-                io.reascale.app.data.ConcurrencyProfile.SAVER to "省电",
-                io.reascale.app.data.ConcurrencyProfile.BALANCED to "平衡",
-                io.reascale.app.data.ConcurrencyProfile.PERFORMANCE to "性能"
-            )
+                    io.reascale.app.data.ConcurrencyProfile.SAVER to "省电 (1)",
+                    io.reascale.app.data.ConcurrencyProfile.BALANCED to "平衡 (2)",
+                    io.reascale.app.data.ConcurrencyProfile.PERFORMANCE to "性能 (3)",
+                    io.reascale.app.data.ConcurrencyProfile.ULTRA to "极速 (4)"
+                )
             options.forEachIndexed { index, (profile, label) ->
                 SegmentedButton(
                     selected = current == profile,

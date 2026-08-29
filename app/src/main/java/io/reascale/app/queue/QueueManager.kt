@@ -162,6 +162,21 @@ class QueueManager(
         }
     }
 
+    /**
+     * [PERSIST-FIX 2026-08-29] 结构性变更（清空/移除/取消）立即落盘：
+     * 心跳写盘有 30s 节流，若进程在节流窗口内被杀，清理前的旧队列恢复到磁盘，
+     * 重启后任务"复活"。这里 mutate 后立刻持久化，确保清理即时生效。
+     */
+    private suspend fun mutatePersist(change: (MutableList<ImageJob>) -> Unit) = withContext(Dispatchers.Default) {
+        mutex.withLock {
+            change(inner)
+            dirty = true
+            snapshot = inner.toList()
+            _jobs.value = snapshot
+            persistLocked()
+        }
+    }
+
     /** 添加单张图任务 */
     suspend fun enqueue(job: ImageJob): String {
         val fixed = job.copy(id = job.id.ifBlank { UUID.randomUUID().toString() })
@@ -210,8 +225,8 @@ class QueueManager(
         ok
     }
 
-    /** 移除已完成/已失败/已取消的 */
-    suspend fun clearFinished() = mutate { list ->
+    /** 移除已完成/已失败/已取消的（[PERSIST-FIX] 结构性变更立即写盘，防被杀后残留旧任务） */
+    suspend fun clearFinished() = mutatePersist { list ->
         list.removeAll {
             it.status == JobStatus.COMPLETED ||
                 it.status == JobStatus.FAILED ||
@@ -219,8 +234,8 @@ class QueueManager(
         }
     }
 
-    /** 全部取消 */
-    suspend fun cancelAll() = mutate { list ->
+    /** 全部取消（结构性变更立即写盘） */
+    suspend fun cancelAll() = mutatePersist { list ->
         val now = System.currentTimeMillis()
         for (i in list.indices) {
             val st = list[i].status
@@ -230,13 +245,13 @@ class QueueManager(
         }
     }
 
-    /** [UX-FIX 2026-08-29] 移除单个任务（任意状态） */
-    suspend fun remove(id: String) = mutate { list ->
+    /** [UX-FIX 2026-08-29] 移除单个任务（任意状态，立即写盘） */
+    suspend fun remove(id: String) = mutatePersist { list ->
         list.removeAll { it.id == id }
     }
 
-    /** [UX-FIX 2026-08-29] 清空整个队列（全部状态） */
-    suspend fun clearAll() = mutate { list -> list.clear() }
+    /** [UX-FIX 2026-08-29] 清空整个队列（全部状态，立即写盘） */
+    suspend fun clearAll() = mutatePersist { list -> list.clear() }
 
     /**
      * [UX-FIX 2026-08-29] 重试任务：FAILED/CANCELLED → PENDING
