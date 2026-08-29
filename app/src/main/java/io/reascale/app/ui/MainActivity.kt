@@ -82,10 +82,30 @@ class MainActivity : ComponentActivity() {
     private var showFolderInputDialog by androidx.compose.runtime.mutableStateOf(false)
     private var folderScanBusy by androidx.compose.runtime.mutableStateOf(false)
     private var folderScanResult by androidx.compose.runtime.mutableStateOf("")
-    /** 已选目录（SAF tree，持久授权后保存） */
+    /** 已选目录（SAF tree，持久授权后保存；重启后从 SharedPreferences 恢复） */
     private var scanTreeUri: Uri? by androidx.compose.runtime.mutableStateOf(null)
     /** 扫描结果（待用户确认后添加） */
     private var scanFoundUris: List<Uri> by androidx.compose.runtime.mutableStateOf(emptyList())
+
+    /** [RELIABILITY-FIX] 目录授权持久化：重启后无需重新授权，扫描数量稳定 */
+    private fun persistScanTree(uri: Uri) {
+        getSharedPreferences("reascale_prefs", MODE_PRIVATE)
+            .edit().putString("scan_tree_uri", uri.toString()).apply()
+    }
+
+    private fun loadScanTree() {
+        val s = getSharedPreferences("reascale_prefs", MODE_PRIVATE)
+            .getString("scan_tree_uri", null)
+        if (s != null) {
+            runCatching {
+                val uri = Uri.parse(s)
+                // 校验授权仍有效
+                contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+            }.getOrNull()?.let {
+                if (it) scanTreeUri = Uri.parse(s)
+            }
+        }
+    }
 
     /** [CRASH-FIX 2026-08-29] 返回前台（含选图返回）重置软启动窗口，摊平处理峰值 */
     override fun onResume() {
@@ -175,6 +195,7 @@ class MainActivity : ComponentActivity() {
                 showFolderInputDialog = true
             }
             Log.i("MainActivity", "tree picker launcher registered")
+            loadScanTree() // [RELIABILITY-FIX] 恢复上次授权的扫描目录
         } catch (t: Throwable) {
             Log.e("MainActivity", "register tree picker failed", t)
         }

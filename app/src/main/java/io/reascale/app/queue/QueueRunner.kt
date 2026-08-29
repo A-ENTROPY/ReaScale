@@ -258,11 +258,31 @@ class QueueRunner(
         } catch (ce: CancellationException) {
             throw ce
         } catch (oom: OutOfMemoryError) {
-            queue.markFailed(jobId, "内存不足: ${oom.message}")
+            failWithRetry(jobId, "内存不足: ${oom.message}")
             LogBus.e("QueueRunner", "❌ OOM on $jobId", oom)
         } catch (t: Throwable) {
-            queue.markFailed(jobId, t.message ?: "未知异常")
+            failWithRetry(jobId, t.message ?: "未知异常")
             LogBus.e("QueueRunner", "❌ job $jobId failed", t)
+        }
+    }
+
+    /**
+     * [RELIABILITY-FIX 2026-08-29] 失败自动重试：瞬时错误（IO/OOM/枚举）重试最多
+     * MAX_AUTO_RETRY 次（每次重试置回 PENDING 由调度器重新调度，带递增 retryCount），
+     * 超过后标记 FAILED。确保"处理绝大多数成功"而非一盘散沙的失败任务。
+     */
+    private suspend fun failWithRetry(jobId: String, error: String) {
+        val rc = queue.findById(jobId)?.retryCount ?: 0
+        if (rc < MAX_AUTO_RETRY) {
+            queue.markFailed(jobId, error)   // 记录本次错误（守卫允许 PENDING/RUNNING→FAILED）
+            val ok = queue.retry(jobId)      // FAILED→PENDING，retryCount+1
+            if (ok) {
+                LogBus.w("QueueRunner", "🔄 job $jobId 失败自动重试 #${rc + 1}: $error")
+            } else {
+                queue.markFailed(jobId, error) // retry 守卫未过（状态异常）→ 保持失败
+            }
+        } else {
+            queue.markFailed(jobId, error)
         }
     }
 
@@ -326,5 +346,8 @@ class QueueRunner(
 
         /** [WATCHDOG-FIX] 停滞判定：RUNNING 任务超过该时长无进度更新视为卡死 */
         private const val STALL_TIMEOUT_MS = 20L * 60L * 1000L
+
+        /** [RELIABILITY-FIX] 失败自动重试次数上限 */
+        private const val MAX_AUTO_RETRY = 2
     }
 }
