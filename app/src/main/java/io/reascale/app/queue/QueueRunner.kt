@@ -215,7 +215,22 @@ class QueueRunner(
 
     private suspend fun runOneJob(jobId: String) {
         val app = ReaScaleApp.get()
-        val job = app.queueManager.jobs.value.firstOrNull { it.id == jobId } ?: return
+        var job = app.queueManager.jobs.value.firstOrNull { it.id == jobId } ?: return
+
+        // [CRASH-FIX 2026-08-29] 惰性元数据补全：入队时未 probe，处理前补宽高（调度内存估算用）
+        if (job.sourceWidth <= 0 || job.sourceHeight <= 0) {
+            val meta = io.reascale.app.core.imageio.ImageProbe.probe(
+                app, android.net.Uri.parse(job.sourceUri)
+            )
+            if (meta != null) {
+                job = job.copy(
+                    sourceWidth = meta.width,
+                    sourceHeight = meta.height,
+                    sourceSizeBytes = meta.fileSizeBytes
+                )
+                queue.update(job)
+            }
+        }
 
         // 防御：如果 EngineRepository 还没初始化完（race），等 100ms 再查一次，最多 10 次
         var profile = app.engineRepository.findById(job.engineId)

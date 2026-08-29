@@ -118,8 +118,12 @@ object MemoryBudget {
      * 用于 §27 性能 SLA 监控
      */
     fun estimatePeakMB(job: ImageJob, context: Context): Long {
-        val outW = job.sourceWidth * job.upscalePlan.targetScale
-        val outH = job.sourceHeight * job.upscalePlan.targetScale
+        // [CRASH-FIX 2026-08-29] 尺寸未知（惰性 probe 后宽高=0）：保守按 12MP 输入估算，
+        // 避免调度器因 0 尺寸低估内存而并发失控
+        val w = if (job.sourceWidth > 0) job.sourceWidth else 3456
+        val h = if (job.sourceHeight > 0) job.sourceHeight else 3456
+        val outW = w * job.upscalePlan.targetScale
+        val outH = h * job.upscalePlan.targetScale
         // 1 输入 float32 + 1 输出 uint8 = 4*3 + 4 = 16 字节/像素
         val tileEdge = maxTileEdge(context)
         val inTileMB = (tileEdge.toLong() * tileEdge * 16L) / (1024L * 1024L)

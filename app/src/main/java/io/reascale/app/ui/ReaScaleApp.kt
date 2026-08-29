@@ -171,37 +171,27 @@ fun handlePickedImages(
         val scope = app.appScope
         scope.launch(Dispatchers.IO) {
             try {
-                // [PERF 2026-08-26] 分批 probe+入队（每批 128）：先探明的先入队显示，
-                // 避免大选择集一次性全部 probe（慢）后才入队；每批入队一次原子快照。
-                fun buildJob(uri: Uri): ImageJob? = try {
-                    val meta = ImageProbe.probe(context, uri) ?: return null
-                    val displayName = runCatching {
-                        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
-                            if (c.moveToFirst()) {
-                                val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-                                if (idx >= 0) c.getString(idx) else null
-                            } else null
-                        }
-                    }.getOrNull() ?: uri.lastPathSegment?.substringAfterLast('/') ?: "image"
-                    ImageJob(
+                // [CRASH-FIX 2026-08-29] 惰性入队：选图返回瞬间零重活（不 probe/不 query），
+                // 只创建 ImageJob 对象 → 进程迅速恢复前台不被系统杀。
+                // 尺寸/元数据由 QueueRunner worker 开始处理时补全（update job）。
+                fun buildJob(uri: Uri): ImageJob {
+                    val displayName = uri.lastPathSegment?.substringAfterLast('/') ?: "image"
+                    return ImageJob(
                         id = "",
                         sourceUri = uri.toString(),
                         sourceDisplayName = displayName,
-                        sourceSizeBytes = meta.fileSizeBytes,
-                        sourceWidth = meta.width,
-                        sourceHeight = meta.height,
+                        sourceSizeBytes = 0L,
+                        sourceWidth = 0,
+                        sourceHeight = 0,
                         engineId = engineId,
                         upscalePlan = UpscalePlan(targetScale = targetScale),
                         encodeOptions = settings.encodeOptions
                     )
-                } catch (t: Throwable) {
-                    android.util.Log.w("handlePickedImages", "skip uri=$uri", t)
-                    null
                 }
 
                 val batch = mutableListOf<ImageJob>()
                 for (uri in uris) {
-                    buildJob(uri)?.let { batch.add(it) }
+                    batch.add(buildJob(uri))
                     if (batch.size >= BATCH_SIZE) {
                         app.queueManager.enqueueAll(batch.toList())
                         batch.clear()
