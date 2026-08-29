@@ -548,13 +548,15 @@ class ImageProcessor(
                         for (bt in rowBitmaps) {
                             val uW = bt.bmp.width
                             val uH = bt.bmp.height
-                            val px = IntArray(uW * uH)
-                            bt.bmp.getPixels(px, 0, uW, 0, 0, uW, uH)
+                            // [OOM-FIX 2026-08-29] 整块 IntArray(uW*uH) 改逐行取像素：
+                            // 5120 宽 tile 的整块像素数组 = 100MB+ Java heap（上千张累计
+                            // GC 滞留 → heap 逼近限制 → MIUI ProcessManager 杀进程）
+                            val pxRow = IntArray(uW)
                             val row = ByteArray(uW * 3)
                             for (yy in 0 until uH) {
-                                val base = yy * uW
+                                bt.bmp.getPixels(pxRow, 0, uW, 0, yy, uW, 1)
                                 for (xx in 0 until uW) {
-                                    val p = px[base + xx]
+                                    val p = pxRow[xx]
                                     row[xx * 3] = ((p shr 16) and 0xFF).toByte()
                                     row[xx * 3 + 1] = ((p shr 8) and 0xFF).toByte()
                                     row[xx * 3 + 2] = (p and 0xFF).toByte()

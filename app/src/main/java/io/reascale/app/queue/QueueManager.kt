@@ -318,7 +318,7 @@ class QueueManager(
 
     companion object {
         private const val FLUSH_INTERVAL_MS = 400L
-        private const val DISK_INTERVAL_MS = 2000L
+        private const val DISK_INTERVAL_MS = 30_000L
         private const val PERSIST_FILE = "queue_jobs.json"
     }
 }
