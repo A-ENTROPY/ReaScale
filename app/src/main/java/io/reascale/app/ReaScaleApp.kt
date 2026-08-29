@@ -103,6 +103,21 @@ class ReaScaleApp : Application() {
             .getOrNull() ?: "?"
         LogBus.i("ReaScaleApp", "=== APP START === packageName=$packageName, versionName=$vn, modelsDir=${filesDir}/engines/models")
 
+        // [RESUME-FIX 2026-08-29] 系统调度兜底：厂商杀进程后 JobScheduler 自动重启本 Worker，
+        // 检查持久化队列继续处理（主流方案：WorkManager 任务受厂商豁免最彻底）
+        runCatching {
+            val resumeRequest = androidx.work.PeriodicWorkRequestBuilder<io.reascale.app.queue.QueueResumeWorker>(
+                15, java.util.concurrent.TimeUnit.MINUTES
+            ).build()
+            androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork(
+                "queue_resume",
+                androidx.work.ExistingPeriodicWorkPolicy.UPDATE,
+                resumeRequest
+            )
+        }.onFailure {
+            LogBus.e("ReaScaleApp", "注册队列恢复 Worker 失败（忽略）", it)
+        }
+
         // 异步初始化引擎档案；初始化完成后启动队列执行器
         // 这样能彻底避免 500ms 轮询比 initialize() 快 → "引擎不存在"
         appScope.launch {

@@ -310,6 +310,15 @@ class QueueManager(
         }
     }
 
+    /** [RESUME-FIX] 是否有未完成任务（PENDING/RUNNING）——WorkManager 恢复 Worker 用 */
+    fun hasOutstanding(): Boolean {
+        for (j in snapshot) {
+            val s = j.status
+            if (s == JobStatus.PENDING || s == JobStatus.RUNNING) return true
+        }
+        return false
+    }
+
     /** 单条读取 */
     fun findById(id: String): ImageJob? = snapshot.firstOrNull { it.id == id }
 
