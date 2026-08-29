@@ -116,11 +116,11 @@ class ImageProcessor(
         val baseNameEarly = try { job.sourceDisplayName.substringBeforeLast('.') }
             catch (t: Throwable) { "image" }
         var finalBitmap: Bitmap = try {
-            // [FIX 2026-08-18] 决策改为：输入 >32M 像素 或 输出可能 >200MB bitmap 时
-            // 都走外部分块路径。输出超大的 JXL 由 processTiled 内部转流式编码
-            // （引擎不产出整图输出位图，避免 OOM）。
+            // [OOM-FIX 2026-08-29] 入口同样降阈值：输出 >32MB 就直接走 processTiled（流式 tile 推理），
+            // 避免整图解码（48MB）+ 引擎整图输出（192MB）的高峰叠加。
+            // 整图路径只留给 ≤800 万输出像素的小图（单张峰值 <100MB）。
             val hugeOutput = meta.width.toLong() * factor * meta.height * factor * 4L >
-                200L * 1024L * 1024L
+                32L * 1024L * 1024L
             if (meta.pixelCount > 32_000_000L || hugeOutput) {
                 // 超大图：BitmapRegionDecoder 流式分块（外部串行）或流式 JXL 直写
                 val plan = MemoryBudget.planTiles(meta.width, meta.height, context)
@@ -222,8 +222,13 @@ class ImageProcessor(
         LogBus.i("ImageProcessor", "🟦 processTiled: src=${srcW}x${srcH} → out=${outW}x${outH} (${outPx}px), factor=${factor}x")
 
         // === v8 决策：output bitmap 大小 vs heap ===
+        // [OOM-FIX 2026-08-29] 整图路径阈值 200MB → 32MB：40MP 输出 Bitmap(native) 192MB +
+        // 输入解码 48MB + NCNN 中间缓冲 = 单张 300-400MB 峰值；2-3 并发即 1GB+ 高峰 →
+        // 系统（MIUI SmartPower / LMKD）判定内存压力强杀后台进程。
+        // 降到 32MB（800 万输出像素）：≥2MP 源图的 2x/4x 全部强制走流式 tile 路径——
+        // tile 级推理 + 流式编码，单张峰值 ~60MB，2-3 并发 ~150MB，慢速但低内存不死。
         val outputBitmapBytes = outPx * 4L
-        val maxOutputBitmapBytes = 200L * 1024L * 1024L  // 200MB
+        val maxOutputBitmapBytes = 32L * 1024L * 1024L  // 32MB 输出 = 800 万像素
         val canFitSingleBitmap = outputBitmapBytes <= maxOutputBitmapBytes
 
         // [FIX 2026-08-18] 超大输出（>200MB bitmap）：
