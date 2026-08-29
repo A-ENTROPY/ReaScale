@@ -42,7 +42,15 @@ class QueueRunner(
     private val processor: ImageProcessor
 ) {
 
-    private val runnerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val runnerScope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.IO +
+            // [CRASH-FIX 2026-08-29] 进度协程等子协程异常不自杀进程（记录继续）
+            kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+                android.util.Log.e("QueueRunner", "未捕获协程异常", e)
+                LogBus.e("QueueRunner", "未捕获协程异常: ${e.message}")
+            }
+    )
     private var schedulerJob: Job? = null
     /** jobId → worker Job（取消单个任务时联动取消 worker） */
     private val activeWorkers = mutableMapOf<String, Job>()

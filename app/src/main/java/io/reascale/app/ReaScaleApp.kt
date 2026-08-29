@@ -27,7 +27,16 @@ class ReaScaleApp : Application() {
 
     /** App 级 CoroutineScope，对应 §6 流水线 */
     val appScope: CoroutineScope by lazy {
-        CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        CoroutineScope(
+            SupervisorJob() +
+                Dispatchers.Default +
+                // [CRASH-FIX 2026-08-29] 子协程异常不再触发全局 uncaught→自杀：
+                // 记录日志继续跑（批量处理中单任务异常不应杀死整个进程）
+                kotlinx.coroutines.CoroutineExceptionHandler { _, e ->
+                    android.util.Log.e("AppScope", "未捕获协程异常", e)
+                    io.reascale.app.debug.LogBus.e("AppScope", "未捕获协程异常: ${e.message}")
+                }
+        )
     }
 
     /** 引擎档案仓储（单例） */
