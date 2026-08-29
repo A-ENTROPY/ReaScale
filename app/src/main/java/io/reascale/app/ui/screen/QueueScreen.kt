@@ -59,6 +59,9 @@ private class JobGroups(
     val failed: List<ImageJob>
 )
 
+/** [OOM-FIX 2026-08-29] 每组最大渲染数（数千张队列下控制 Compose diff/分配压力） */
+private const val RENDER_LIMIT = 200
+
 /**
  * 队列页（§30.8.6）
  *
@@ -153,17 +156,29 @@ fun QueueScreen(
 
             if (pending.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_pending), pending.size) }
-                items(pending, key = { it.id }) { j -> PendingJobCard(j) }
+                // [OOM-FIX 2026-08-29] 超大队列（数千张）：每组最多渲染 RENDER_LIMIT 项，
+                // 其余用计数行代替——LazyColumn 虚拟化只省布局，Compose 仍对全量 diff/分配
+                items(pending.take(RENDER_LIMIT), key = { it.id }) { j -> PendingJobCard(j) }
+                if (pending.size > RENDER_LIMIT) {
+                    item { Text("… 还有 ${pending.size - RENDER_LIMIT} 个等待中", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
             }
 
             if (done.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_completed), done.size) }
-                items(done, key = { it.id }) { j -> DoneJobCard(j) }
+                val recent = done.take(RENDER_LIMIT)
+                items(recent, key = { it.id }) { j -> DoneJobCard(j) }
+                if (done.size > RENDER_LIMIT) {
+                    item { Text("… 已完成 ${done.size - RENDER_LIMIT} 个已折叠", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
             }
 
             if (failed.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_failed), failed.size) }
-                items(failed, key = { it.id }) { j -> FailedJobCard(j) }
+                items(failed.take(RENDER_LIMIT), key = { it.id }) { j -> FailedJobCard(j) }
+                if (failed.size > RENDER_LIMIT) {
+                    item { Text("… 还有 ${failed.size - RENDER_LIMIT} 个失败已折叠", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
             }
 
             item { Spacer(Modifier.height(Spacing.md)) }

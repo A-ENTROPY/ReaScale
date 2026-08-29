@@ -188,7 +188,28 @@ class QueueRunner(
                     delay(500)
                     continue
                 }
-                val peakMB = io.reascale.app.core.MemoryBudget.estimatePeakMB(job, context)
+                // [BUG-FIX 2026-08-29] 惰性 job 尺寸为 0：先 probe 补全再估算内存。
+                // 否则 estimatePeakMB 用保守值（12MP×4x 输出 = 768MB）> heap 预算
+                // → 调度永远不启动 → 任务"一直等待处理"死锁
+                var sizedJob = job
+                if (job.sourceWidth <= 0 || job.sourceHeight <= 0) {
+                    val meta = io.reascale.app.core.imageio.ImageProbe.probe(
+                        context, android.net.Uri.parse(job.sourceUri)
+                    )
+                    if (meta != null) {
+                        sizedJob = job.copy(
+                            sourceWidth = meta.width,
+                            sourceHeight = meta.height,
+                            sourceSizeBytes = meta.fileSizeBytes
+                        )
+                        queue.update(sizedJob)
+                    } else {
+                        // 无法读取（文件被删/权限丢失）：标记失败，避免死循环
+                        queue.markFailed(job.id, "无法读取图片")
+                        continue
+                    }
+                }
+                val peakMB = io.reascale.app.core.MemoryBudget.estimatePeakMB(sizedJob, context)
                 if (activePeakMB.get() + peakMB > heapBudgetMB) {
                     delay(600)  // 内存不足：等待高占用 worker 释放
                     continue
