@@ -74,6 +74,11 @@ class QueueRunner(
         }
     }
 
+    /** [CRASH-FIX 2026-08-29] 前台恢复通知：重置软启动窗口（选图返回瞬间生效） */
+    fun notifyForeground() {
+        schedulerStartedAt = System.currentTimeMillis()
+    }
+
     /**
      * 暂停：停止调度新任务。
      * 正在执行的 worker 让其自然完成（原生推理无法中断），完成后正常标记 COMPLETED；
@@ -155,11 +160,17 @@ class QueueRunner(
                 // [FIX 2026-08-17] 前台服务联动：有活跃任务 → 启动；空闲 → 停止
                 syncForegroundService(settings.enableForegroundService)
 
+                // [CRASH-FIX 2026-08-29] 软启动：进程变可见后的 15s 内只允许 1 个 worker，
+                // 且启动间隔 1.5s——摊平返回瞬间（选图结束/开机恢复）的 CPU/内存尖峰。
+                // （MIUI SmartPower 会杀"可见但高负载"进程，实测 fg TOP 也被 SIGKILL）
+                val rampUp = System.currentTimeMillis() - schedulerStartedAt < SOFT_START_WINDOW_MS
+                val effectiveConcurrent = if (rampUp) 1 else maxConcurrent
+
                 // [OOM-FIX 2026-08-26] 内存感知调度：并发峰值总和 ≤ heap 预算
                 // 每张图（输入解码 + 引擎输出 + tile 缓冲）峰值可达数百 MB，2-3 并发 × 大图
                 // 会突破 heap 上限 → OOM 闪退。调度器按 estimatePeakMB 累计预算，
                 // 内存不够就等待（图片处理是串行降级，任务不丢）。
-                val available = maxConcurrent - activeWorkers.size
+                val available = effectiveConcurrent - activeWorkers.size
                 if (available <= 0) {
                     delay(300)
                     continue
@@ -184,7 +195,8 @@ class QueueRunner(
                     }
                 }
                 activeWorkers[job.id] = w
-                delay(100)
+                // 软启动窗口内启动间隔 1.5s（摊平尖峰），正常后 100ms
+                delay(if (rampUp) 1500 else 100)
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 android.util.Log.e("QueueRunner", "scheduler loop error", t)
@@ -269,5 +281,6 @@ class QueueRunner(
 
     companion object {
         private const val FG_START_COOLDOWN_MS = 1500L
+        private const val SOFT_START_WINDOW_MS = 15_000L
     }
 }

@@ -74,6 +74,14 @@ class MainActivity : ComponentActivity() {
     // 待启动的第三方文件管理器列表（点"文件管理器"后填充，弹选择框）
     private var fmCandidates by androidx.compose.runtime.mutableStateOf<List<android.content.pm.ResolveInfo>>(emptyList())
 
+    /** [CRASH-FIX 2026-08-29] 返回前台（含选图返回）重置软启动窗口，摊平处理峰值 */
+    override fun onResume() {
+        super.onResume()
+        runCatching {
+            ReaScaleApp.get().queueRunner.notifyForeground()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
