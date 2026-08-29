@@ -307,6 +307,7 @@ class QueueManager(
                     startedAt = System.currentTimeMillis(),
                     progress = 0f
                 )
+                touchProgress(id)
             }
         }
         ok
@@ -320,6 +321,7 @@ class QueueManager(
         val idx = list.indexOfFirst { it.id == id }
         if (idx >= 0) {
             list[idx] = list[idx].copy(progress = progress.coerceIn(0f, 1f))
+            touchProgress(id)
         }
     }
 
@@ -378,6 +380,29 @@ class QueueManager(
 
     /** 单条读取 */
     fun findById(id: String): ImageJob? = snapshot.firstOrNull { it.id == id }
+
+    /** [WATCHDOG-FIX] 各任务最近一次进度时间（seen 进程内） */
+    private val lastProgressAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun touchProgress(id: String, at: Long = System.currentTimeMillis()) {
+        lastProgressAt[id] = at
+    }
+
+    /**
+     * [WATCHDOG-FIX] 停滞任务检测：RUNNING 且超过 stallMs 无任何进度更新。
+     * 用于调度器看门狗——引擎卡死时释放并发槽，防止队列永久停摆。
+     */
+    fun stalledJobId(nowMs: Long): String? {
+        for (j in snapshot) {
+            if (j.status == JobStatus.RUNNING) {
+                val last = lastProgressAt[j.id] ?: j.startedAt
+                if (last > 0 && nowMs - last > stallMs) return j.id
+            }
+        }
+        return null
+    }
+
+    var stallMs: Long = 20L * 60L * 1000L
 
     @Serializable
     private data class QueueEnvelope(val jobs: List<ImageJob>)

@@ -73,7 +73,7 @@ private class JobGroups(
 )
 
 /** [OOM-FIX 2026-08-29] 每组最大渲染数（数千张队列下控制 Compose diff/分配压力） */
-private const val RENDER_LIMIT = 200
+private const val RENDER_LIMIT = 500
 
 /**
  * 队列页（§30.8.6）

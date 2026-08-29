@@ -124,9 +124,15 @@ object MediaStoreWriter {
             val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             val uri = resolver.insert(collection, values) ?: return null
             return try {
-                resolver.openOutputStream(uri)?.use { out ->
+                // [CRITICAL-FIX 2026-08-29] 必须校验编码结果：encodeTo 失败（大图 OOM/格式异常）
+                // 时若仍 publish，会留下空/残文件且任务被标记"成功"（用户看到成功但照片打不开）
+                val ok = resolver.openOutputStream(uri)?.use { out ->
                     encodeTo(context, bitmap, options, out)
-                } ?: return null
+                } ?: false
+                if (!ok) {
+                    resolver.delete(uri, null, null)
+                    return null
+                }
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 resolver.update(uri, values, null, null)
