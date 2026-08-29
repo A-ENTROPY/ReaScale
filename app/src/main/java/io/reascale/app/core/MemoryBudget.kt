@@ -122,14 +122,27 @@ object MemoryBudget {
         // 避免调度器因 0 尺寸低估内存而并发失控
         val w = if (job.sourceWidth > 0) job.sourceWidth else 3456
         val h = if (job.sourceHeight > 0) job.sourceHeight else 3456
-        val outW = w * job.upscalePlan.targetScale
-        val outH = h * job.upscalePlan.targetScale
+        val outW = w.toLong() * job.upscalePlan.targetScale
+        val outH = h.toLong() * job.upscalePlan.targetScale
+        val outBytes = outW * outH * 4L
+        // [CONCURRENCY-FIX 2026-08-29] 流式路径（输出 bitmap >180MB，走 processTiled
+        // tile 级推理 + 流式写出）单张峰值与"整图输出"估算无关：tile 推理 ~60MB + 行带
+        // 位图 ~80MB → 保守 160MB。原估算用整图输出（4x 大图 → 768MB）> 调度预算，
+        // 导致所有大图永久只能 1 并发（用户实测"开极速也一次一张"）。
+        // 整图路径（输出 ≤180MB bitmap）保持真实估算。
+        val wholeImageBudget = 180L * 1024L * 1024L
+        if (outBytes > wholeImageBudget) {
+            return STREAMING_PEAK_MB
+        }
         // 1 输入 float32 + 1 输出 uint8 = 4*3 + 4 = 16 字节/像素
         val tileEdge = maxTileEdge(context)
         val inTileMB = (tileEdge.toLong() * tileEdge * 16L) / (1024L * 1024L)
-        val outMB = (outW.toLong() * outH * 4L) / (1024L * 1024L)
+        val outMB = outBytes / (1024L * 1024L)
         return ENGINE_RESIDENT_MB + inTileMB + outMB + 30L // 30MB 系统开销
     }
+
+    /** [CONCURRENCY-FIX] 流式路径单张峰值（tile 推理 + 行带缓冲 + 编码器） */
+    private const val STREAMING_PEAK_MB = 160L
 }
 
 data class Tile(

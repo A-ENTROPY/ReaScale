@@ -203,7 +203,8 @@ class QueueRunner(
                             sourceHeight = meta.height,
                             sourceSizeBytes = meta.fileSizeBytes
                         )
-                        queue.update(sizedJob)
+                        // [STATE-FIX] 只补尺寸，不覆盖状态（防 RUNNING 被覆盖回 PENDING 双跑）
+                        queue.updateMeta(job.id, meta.width, meta.height, meta.fileSizeBytes)
                     } else {
                         // 无法读取（文件被删/权限丢失）：标记失败，避免死循环
                         queue.markFailed(job.id, "无法读取图片")
@@ -290,7 +291,8 @@ class QueueRunner(
                     sourceHeight = meta.height,
                     sourceSizeBytes = meta.fileSizeBytes
                 )
-                queue.update(job)
+                // [STATE-FIX] 只补尺寸不覆盖状态（防同任务被二次调度）
+                queue.updateMeta(job.id, meta.width, meta.height, meta.fileSizeBytes)
             }
         }
 
@@ -331,7 +333,8 @@ class QueueRunner(
 
     companion object {
         private const val FG_START_COOLDOWN_MS = 1500L
-        private const val SOFT_START_WINDOW_MS = 15_000L
+        /** 软启动窗口 8s：仅进程冷启/选图返回后的过渡期串行，之后恢复全并发 */
+        private const val SOFT_START_WINDOW_MS = 8_000L
 
         /** [RELIABILITY-FIX] 失败自动重试次数上限 */
         private const val MAX_AUTO_RETRY = 2

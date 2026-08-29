@@ -209,6 +209,24 @@ class QueueManager(
         if (idx >= 0) list[idx] = job
     }
 
+    /**
+     * [STATE-FIX 2026-08-29] 元数据补全（惰性 probe 的宽高/大小）专用：
+     * **只改尺寸字段，绝不覆盖 status/progress/终态**。
+     * 原代码用 update() 全量替换，会把 RUNNING 覆盖回 PENDING →
+     * 同一任务被调度两次并发执行（日志实锤：同 id 双 worker 推理）→"停顿"假象。
+     */
+    suspend fun updateMeta(id: String, width: Int, height: Int, sizeBytes: Long) = mutate { list ->
+        val idx = list.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            val cur = list[idx]
+            list[idx] = cur.copy(
+                sourceWidth = width,
+                sourceHeight = height,
+                sourceSizeBytes = sizeBytes
+            )
+        }
+    }
+
     /** 取消任务（仅非终态可取消；正在执行的 worker 由 QueueRunner 负责取消）[实时性：锁内查询] */
     suspend fun cancel(id: String): Boolean = withContext(Dispatchers.Default) {
         var ok = false
