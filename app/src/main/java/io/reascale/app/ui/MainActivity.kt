@@ -82,6 +82,10 @@ class MainActivity : ComponentActivity() {
     private var showFolderInputDialog by androidx.compose.runtime.mutableStateOf(false)
     private var folderScanBusy by androidx.compose.runtime.mutableStateOf(false)
     private var folderScanResult by androidx.compose.runtime.mutableStateOf("")
+    /** 已选目录（SAF tree，持久授权后保存） */
+    private var scanTreeUri: Uri? by androidx.compose.runtime.mutableStateOf(null)
+    /** 扫描结果（待用户确认后添加） */
+    private var scanFoundUris: List<Uri> by androidx.compose.runtime.mutableStateOf(emptyList())
 
     /** [CRASH-FIX 2026-08-29] 返回前台（含选图返回）重置软启动窗口，摊平处理峰值 */
     override fun onResume() {
@@ -164,41 +168,11 @@ class MainActivity : ComponentActivity() {
                 } catch (t: Throwable) {
                     Log.w("MainActivity", "takePersistableUriPermission failed", t)
                 }
-                lifecycleScope.launch {
-                    val settingsNow = runCatching {
-                        ReaScaleApp.get().settingsRepository.settingsFlow.first()
-                    }.getOrNull()
-                    val engineId = settingsNow?.defaultEngineId ?: "builtin_realesrgan_x2plus"
-                    val targetScale = settingsNow?.let { s ->
-                        val ep = runCatching { ReaScaleApp.get().paramsRepository.get(s.defaultEngineId) }.getOrNull()
-                        val ts = ep?.targetScale
-                        if (ts != null && ts.enabled) ts.value else ts?.effective()
-                    } ?: 4
-                    folderScanBusy = true
-                    folderScanResult = "正在扫描…"
-                    try {
-                        val uris = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                            io.reascale.app.core.imageio.FolderScanner.scanTree(this@MainActivity, treeUri)
-                        }
-                        folderScanResult = "找到 ${uris.size} 张图片，正在入队…"
-                        if (uris.isNotEmpty()) {
-                            handlePickedImages(
-                                context = this@MainActivity,
-                                uris = uris,
-                                engineId = engineId,
-                                targetScale = targetScale,
-                                settings = settingsNow ?: io.reascale.app.data.AppSettings()
-                            )
-                        }
-                    } catch (t: Throwable) {
-                        Log.e("MainActivity", "tree scan failed", t)
-                        folderScanResult = "扫描失败: ${t.message}"
-                    } finally {
-                        folderScanBusy = false
-                        folderScanResult = ""
-                        showFolderInputDialog = false
-                    }
-                }
+                // [MANUAL-FIX 2026-08-29] 只保存目录，不自动扫描/入队（用户手动点"扫描"/"添加"）
+                scanTreeUri = treeUri
+                scanFoundUris = emptyList()
+                folderScanResult = "已选择文件夹，点「扫描」查找图片"
+                showFolderInputDialog = true
             }
             Log.i("MainActivity", "tree picker launcher registered")
         } catch (t: Throwable) {
@@ -415,11 +389,12 @@ class MainActivity : ComponentActivity() {
                             text = {
                                 androidx.compose.foundation.layout.Column {
                                     Text(
-                                        "点击下方按钮选择图片文件夹（系统文件夹选择器，含子目录递归）。\n" +
-                                            "授权一次后扫描与处理全程在应用内进行。",
+                                        "三步操作：① 选择文件夹 → ② 扫描 → ③ 添加到队列。\n" +
+                                            "扫描与后续处理全程在应用内进行（含子目录）。",
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Spacer(Modifier.height(8.dp))
+                                    // ① 选择文件夹
                                     TextButton(
                                         onClick = {
                                             if (folderScanBusy) return@TextButton
@@ -428,9 +403,62 @@ class MainActivity : ComponentActivity() {
                                             treePickerLauncher?.launch(null)
                                         },
                                         enabled = !folderScanBusy
-                                    ) {
-                                        Text("选择文件夹…")
-                                    }
+                                    ) { Text("① 选择文件夹…") }
+                                    // ② 扫描
+                                    TextButton(
+                                        onClick = {
+                                            if (folderScanBusy) return@TextButton
+                                            val tree = scanTreeUri ?: return@TextButton
+                                            folderScanBusy = true
+                                            folderScanResult = "正在扫描…"
+                                            lifecycleScope.launch(Dispatchers.IO) {
+                                                try {
+                                                    val uris = io.reascale.app.core.imageio.FolderScanner.scanTree(
+                                                        this@MainActivity, tree
+                                                    )
+                                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                        scanFoundUris = uris
+                                                        folderScanResult = "找到 ${uris.size} 张图片，点「添加」入队"
+                                                    }
+                                                } catch (t: Throwable) {
+                                                    Log.e("MainActivity", "scan failed", t)
+                                                    kotlinx.coroutines.withContext(Dispatchers.Main) {
+                                                        folderScanResult = "扫描失败: ${t.message}"
+                                                    }
+                                                } finally {
+                                                    kotlinx.coroutines.withContext(Dispatchers.Main) { folderScanBusy = false }
+                                                }
+                                            }
+                                        },
+                                        enabled = !folderScanBusy && scanTreeUri != null
+                                    ) { Text(if (folderScanBusy) "扫描中…" else "② 扫描该文件夹") }
+                                    // ③ 添加到队列
+                                    TextButton(
+                                        onClick = {
+                                            val uris = scanFoundUris
+                                            if (uris.isEmpty()) return@TextButton
+                                            showFolderInputDialog = false
+                                            lifecycleScope.launch {
+                                                val settingsNow = runCatching {
+                                                    ReaScaleApp.get().settingsRepository.settingsFlow.first()
+                                                }.getOrNull()
+                                                val engineId = settingsNow?.defaultEngineId ?: "builtin_realesrgan_x2plus"
+                                                val targetScale = settingsNow?.let { s ->
+                                                    val ep = runCatching { ReaScaleApp.get().paramsRepository.get(s.defaultEngineId) }.getOrNull()
+                                                    val ts = ep?.targetScale
+                                                    if (ts != null && ts.enabled) ts.value else ts?.effective()
+                                                } ?: 4
+                                                handlePickedImages(
+                                                    context = this@MainActivity,
+                                                    uris = uris,
+                                                    engineId = engineId,
+                                                    targetScale = targetScale,
+                                                    settings = settingsNow ?: io.reascale.app.data.AppSettings()
+                                                )
+                                            }
+                                        },
+                                        enabled = scanFoundUris.isNotEmpty() && !folderScanBusy
+                                    ) { Text("③ 添加到队列（${scanFoundUris.size} 张）") }
                                     if (folderScanResult.isNotEmpty()) {
                                         Spacer(Modifier.height(8.dp))
                                         Text(folderScanResult, style = MaterialTheme.typography.bodySmall)

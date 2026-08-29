@@ -1,6 +1,13 @@
 package io.reascale.app.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,6 +19,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -132,14 +142,17 @@ fun QueueScreen(
             return@Scaffold
         }
 
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .padding(horizontal = Spacing.md),
-            verticalArrangement = Arrangement.spacedBy(Spacing.sm),
-            contentPadding = PaddingValues(vertical = Spacing.md)
-        ) {
+        // [UX-FIX 2026-08-29] 快速定位滚动条（数千上万张队列快速滑动/定位）
+        val listState = rememberLazyListState()
+        Box(modifier = Modifier.fillMaxSize().padding(inner)) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = Spacing.md),
+                verticalArrangement = Arrangement.spacedBy(Spacing.sm),
+                contentPadding = PaddingValues(vertical = Spacing.md)
+            ) {
             item {
                 QueueSummaryCard(
                     total = list.size,
@@ -186,12 +199,28 @@ fun QueueScreen(
                 GlobalActions(
                     canPause = isRunnerRunning,
                     canStart = !isRunnerRunning && pending.isNotEmpty(),
-                    onPause = { scope.launch { app.queueRunner.pause() } },
-                    onStart = { app.queueRunner.start() },
+                    onPause = {
+                        app.setProcessingEnabled(false)
+                        scope.launch { app.queueRunner.pause() }
+                    },
+                    onStart = {
+                        app.setProcessingEnabled(true)
+                        app.queueRunner.start()
+                    },
                     onClear = { scope.launch { app.queueManager.clearFinished() } }
                 )
             }
-        }
+
+            } // LazyColumn end
+            // [UX-FIX 2026-08-29] 右侧快速定位滚动条（拖动跳转，支持上万条）
+            FastScrollBar(
+                listState = listState,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(14.dp)
+            )
+        } // Box end
     }
 }
 
@@ -458,3 +487,51 @@ private fun GlobalActions(
         }
     }
 }
+
+/**
+ * [UX-FIX 2026-08-29] 快速定位滚动条：拖动右侧条按比例跳转到对应列表位置。
+ * 自研实现（Compose 1.10 已移除 built-in VerticalScrollbar），适用于上万条队列。
+ */
+@Composable
+private fun FastScrollBar(listState: androidx.compose.foundation.lazy.LazyListState, modifier: Modifier = Modifier) {
+    val barColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+    val thumbColor = MaterialTheme.colorScheme.primary
+    val scope = rememberCoroutineScope()
+
+    BoxWithConstraints(modifier = modifier) {
+        val barH = constraints.maxHeight.toFloat()
+        val totalItems = listState.layoutInfo.totalItemsCount.coerceAtLeast(1)
+        // 估算每项高度 ~64dp → 总内容高度；thumb 高度 = 视口比例
+        val itemH = with(androidx.compose.ui.platform.LocalDensity.current) { 64.dp.toPx() }
+        val contentH = totalItems * itemH
+        val thumbH = (barH * (barH / contentH)).coerceIn(28f, barH)
+        val track = barH - thumbH
+
+        Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(totalItems, barH, thumbH, track) {
+                        detectDragGestures { change, _ ->
+                            change.consume()
+                            val ratio = ((change.position.y - thumbH / 2f) / track).coerceIn(0f, 1f)
+                            val target = (ratio * totalItems).toInt().coerceIn(0, totalItems - 1)
+                            scope.launch { listState.scrollToItem(target) }
+                        }
+                    }
+            ) {
+                // 轨道
+                drawRoundRect(color = barColor, cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()))
+                // thumb：跟随当前首项位置
+                val ratio = if (contentH > barH) {
+                    (listState.firstVisibleItemIndex.toFloat() + listState.firstVisibleItemScrollOffset / itemH) / totalItems
+                } else 0f
+                val y = ratio * track
+                drawRoundRect(
+                    color = thumbColor,
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, y),
+                    size = androidx.compose.ui.geometry.Size(size.width, thumbH),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx())
+                )
+            }
+        }
+    }

@@ -163,15 +163,23 @@ class ReaScaleApp : Application() {
                 }
                 LogBus.i("ReaScaleApp", "engine id=${p.id} model=${p.modelUri} exists=$exists source=${p.source} baseScale=${p.capabilities.baseScale} mean=${p.capabilities.mean} std=${p.capabilities.std}")
             }
-            // 2026-08-18：ONNX Runtime 恢复（onnxruntime-android 1.23.2，用户导入 .onnx 模型）
+            // [MANUAL-FIX 2026-08-29] 手动控制处理：默认不自动跑，用户点"开始处理"才启动
             _ready = true
-            queueRunner.start()
         }
+    }
+
+    /** 手动处理开关（持久化）：true 时调度器/恢复 Worker 才处理队列 */
+    val processingEnabled: Boolean
+        get() = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("processing_enabled", false)
+
+    fun setProcessingEnabled(on: Boolean) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("processing_enabled", on).apply()
     }
 
     companion object {
         @Volatile
         private var instance: ReaScaleApp? = null
+        private const val PREFS = "reascale_prefs"
 
         fun get(): ReaScaleApp = instance
             ?: error("ReaScaleApp not yet initialized. Did Application.onCreate run?")

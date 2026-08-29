@@ -26,7 +26,8 @@ class QueueResumeWorker(
     override suspend fun doWork(): Result {
         return try {
             val app = ReaScaleApp.get()
-            if (app.queueManager.hasOutstanding()) {
+            // [MANUAL-FIX 2026-08-29] 仅当用户手动开启过处理才自动恢复（尊重"手动控制"）
+            if (app.processingEnabled && app.queueManager.hasOutstanding()) {
                 app.queueRunner.start()
             }
             Result.success()
