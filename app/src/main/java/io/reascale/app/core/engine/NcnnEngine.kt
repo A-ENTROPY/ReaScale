@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import io.reascale.app.data.EngineProfile
 import io.reascale.app.data.ModelParameters
 import io.reascale.app.data.UpscalePlan
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import io.reascale.app.debug.LogBus
@@ -34,11 +35,14 @@ class NcnnEngine(
     // synchronized 块外的可见性需要 volatile 保证
     @Volatile private var engine: ReascaleNcnn? = null
     @Volatile private var isInitialized = false
-    // [FIX 2026-08-11] Mutex 串行化全部推理：ncnn::Net 非线程安全，多 worker 并发调用必崩
-    private val inferenceLock = Mutex()
+    // [PERF 2026-08-29] 去掉推理串行锁：ncnn::Net 支持多 Extractor 并发（官方
+    // realcugan/waifu2x OpenMP 并行 tile 同理），并发 tile 推理与行带并行是提速关键。
+    // 原 Mutex 使所有 tile 排队 → "多线程并行"实际是假象（串行）。
 
     // [FIX 2026-08-16] 当前加载的 noise 值（变化时重载模型）
     private var currentNoise: Int = -1
+    /** [PERF 2026-08-29] 模型重载互斥（防止并发切换期间 close 正在使用的引擎） */
+    private val reloadMonitor = Any()
 
     /**
      * noise → 模型文件名后缀（Real-CUGAN，官方 realcugan-ncnn-vulkan -n 参数）：
@@ -121,14 +125,9 @@ class NcnnEngine(
         plan: UpscalePlan,
         progress: (Float) -> Unit
     ): Bitmap {
-        // [FIX 2026-08-11] 串行化推理防止 ncnn 内部状态冲突
-        // 使用 runBlocking 在同步接口中调用协程 Mutex
-        // 因为 UpscaleEngine.upscale 是同步接口，不能挂起
-        return kotlinx.coroutines.runBlocking {
-            inferenceLock.withLock {
-                _upscale(input, plan, progress)
-            }
-        }
+        // [PERF 2026-08-29] 无锁并发推理（ncnn 多 Extractor 并发安全，官方并行方案）。
+        // noise 重载（换模型）由 reloadMonitor 互斥 + 延迟释放旧引擎保护。
+        return _upscale(input, plan, progress)
     }
 
     private fun _upscale(
@@ -145,10 +144,27 @@ class NcnnEngine(
         val prepad = 0  // 0 = 让 C++ 用探测值
         val noise = if (params.noiseLevel.enabled) params.noiseLevel.value else -1
         val tileSize = 192
-        // [FIX 2026-08-16] noise 变化 → 重载对应模型
+        // [PERF 2026-08-29] noise 变化 → 重载模型。并发推理期间不能立即 close 旧引擎
+        // （可能正在使用）：reloadMonitor 互斥切换引用，旧引擎延迟 5s 由 appScope 释放
         if (noise != currentNoise) {
-            close()  // 释放旧引擎
-            currentNoise = noise
+            val old = synchronized(reloadMonitor) {
+                if (noise == currentNoise) {
+                    null
+                } else {
+                    val o = engine
+                    engine = null
+                    isInitialized = false
+                    currentNoise = noise
+                    o
+                }
+            }
+            if (old != null) {
+                val toClose = old
+                kotlinx.coroutines.GlobalScope.launch {
+                    kotlinx.coroutines.delay(5000)
+                    runCatching { toClose.release() }
+                }
+            }
             ensureInit()
         }
 
@@ -233,13 +249,16 @@ class NcnnEngine(
             fileParamPath: String? = null,
             fileBinPath: String? = null
         ): NcnnEngine {
+            // [PERF 2026-08-29] Vulkan 自动启用：设备有 GPU（骁龙 8 系等均支持）→ gpuid=0，
+            // 否则 CPU（-1）。真实启用状态见日志 "GPU 可用 → Vulkan 启用 / CPU 回退"
+            val gpuId = if (ReascaleNcnn().gpuCount() > 0) 0 else -1
             return NcnnEngine(
                 engineId = profile.id,
                 baseScale = scale,
                 context = context,
                 modelDir = modelDir,
                 paramName = paramName,
-                gpuid = -1,
+                gpuid = gpuId,
                 paramsProvider = paramsProvider,
                 fileParamPath = fileParamPath,
                 fileBinPath = fileBinPath

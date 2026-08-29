@@ -37,6 +37,8 @@ struct Session {
     int tile_size = 192;
     int prepadding = 18;
     int num_threads = 1;
+    // [PERF 2026-08-29] 启用 Vulkan 的会话：gpuid>=0 时 use_vulkan_compute=true
+    bool use_vulkan = false;
     // [FIX 2026-08-16] 模型 blob 名（自动探测，兼容任意导入模型）
     std::string in_blob;
     std::string out_blob;
@@ -68,6 +70,8 @@ static std::string jstring2str(JNIEnv* env, jstring jstr) {
 
 static jlong session_new(JNIEnv* env, jobject thiz, jint gpuid, jint threads, jboolean tta) {
     (void)env; (void)thiz; (void)tta;
+    // [PERF 2026-08-29] Vulkan：gpuid>=0 且 GPU 可用才启用（create_gpu_instance 在
+    // 首次调用时加载 Vulkan 驱动，失败则 get_gpu_count()==0 → 自动回退 CPU）
     if (gpuid >= 0 && !g_gpu_inited) {
         ncnn::create_gpu_instance();
         g_gpu_inited = true;
@@ -75,8 +79,25 @@ static jlong session_new(JNIEnv* env, jobject thiz, jint gpuid, jint threads, jb
     Session* s = new Session();
     // [FIX 2026-08-16] 线程数可调，限制 1-4（OpenMP 多线程在部分设备可能死锁）
     s->num_threads = threads > 0 ? (threads < 5 ? threads : 4) : 1;
-    __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "session_new gpuid=%d threads=%d", gpuid, s->num_threads);
+    if (gpuid >= 0 && g_gpu_inited && ncnn::get_gpu_count() > 0) {
+        s->use_vulkan = true;
+        __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "session_new gpuid=%d GPU 可用 → Vulkan 启用", gpuid);
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "session_new gpuid=%d GPU 不可用 → CPU 回退", gpuid);
+    }
     return reinterpret_cast<jlong>(s);
+}
+
+/** [PERF 2026-08-29] 查询设备可用 GPU 数（Kotlin 决定是否请求 Vulkan 会话） */
+static jint ncnn_gpu_count(JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    if (!g_gpu_inited) {
+        ncnn::create_gpu_instance();
+        g_gpu_inited = true;
+    }
+    int n = ncnn::get_gpu_count();
+    __android_log_print(ANDROID_LOG_INFO, "ReaScaleNcnn", "gpu_count=%d", n);
+    return n;
 }
 
 // [FIX 2026-08-17 v2] 自动探测：输出尺寸公式 + 输入域对照实验
@@ -186,10 +207,13 @@ static jboolean session_load_assets(
     if (!s) return JNI_FALSE;
     s->net.clear();
     s->net.opt.num_threads = s->num_threads;
-    s->net.opt.use_vulkan_compute = false;
+    // [PERF 2026-08-29] Vulkan 启用（GPU 可用会话）：fp16 全开最大提速
+    s->net.opt.use_vulkan_compute = s->use_vulkan;
+    s->net.opt.use_fp16_packed = s->use_vulkan;
+    s->net.opt.use_fp16_storage = s->use_vulkan;
+    s->net.opt.use_fp16_arithmetic = s->use_vulkan;
     s->net.opt.use_packing_layout = false;
     s->net.opt.use_bf16_storage = false;
-    s->net.opt.use_fp16_storage = false;
     s->net.opt.use_int8_storage = false;
 
     AAssetManager* mgr = AAssetManager_fromJava(env, asset_mgr);
@@ -232,10 +256,13 @@ static jboolean session_load_from_file(
     if (!s) return JNI_FALSE;
     s->net.clear();
     s->net.opt.num_threads = s->num_threads;
-    s->net.opt.use_vulkan_compute = false;
+    // [PERF 2026-08-29] Vulkan 启用（GPU 可用会话）同样作用于文件加载路径
+    s->net.opt.use_vulkan_compute = s->use_vulkan;
+    s->net.opt.use_fp16_packed = s->use_vulkan;
+    s->net.opt.use_fp16_storage = s->use_vulkan;
+    s->net.opt.use_fp16_arithmetic = s->use_vulkan;
     s->net.opt.use_packing_layout = false;
     s->net.opt.use_bf16_storage = false;
-    s->net.opt.use_fp16_storage = false;
     s->net.opt.use_int8_storage = false;
 
     std::string ppath = jstring2str(env, param_path);
@@ -589,6 +616,7 @@ static void session_destroy(JNIEnv* env, jobject thiz, jlong handle) {
 
 static JNINativeMethod gMethods[] = {
     {"nativeCreate",       "(IIZ)J",                              (void*)&session_new},
+    {"nativeGpuCount",     "()I",                                 (void*)&ncnn_gpu_count},
     {"nativeLoadFromAssets","(JLandroid/content/res/AssetManager;Ljava/lang/String;[B)Z", (void*)&session_load_assets},
     {"nativeLoadFromFile", "(JLjava/lang/String;Ljava/lang/String;)Z",          (void*)&session_load_from_file},
     {"nativeProcess",      "(JLandroid/graphics/Bitmap;Landroid/graphics/Bitmap;IIIILio/reascale/app/core/engine/ReascaleNcnn$NcnnProgressListener;)Z", (void*)&session_process},

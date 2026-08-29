@@ -32,6 +32,8 @@ class ReascaleNcnn {
 
     /** gpuid: -1=CPU, >=0=GPU, ttaMode: true=启用, numThreads: >0 */
     private external fun nativeCreate(gpuid: Int, numThreads: Int, ttaMode: Boolean): Long
+    /** [PERF 2026-08-29] 查询设备 GPU 数量（>0 表示可用 Vulkan） */
+    private external fun nativeGpuCount(): Int
     /** 从 assets 加载 .param + ByteArray 加载 .bin */
     private external fun nativeLoadFromAssets(
         handle: Long,
@@ -64,6 +66,9 @@ class ReascaleNcnn {
     private external fun nativeDestroy(handle: Long)
 
     // ── 公开 API ──
+
+    /** [PERF 2026-08-29] 设备可用 GPU 数（0 = 无 Vulkan，用 CPU） */
+    fun gpuCount(): Int = runCatching { nativeGpuCount() }.getOrDefault(0)
 
     fun init(gpuid: Int = -1, ttaMode: Boolean = false, numThreads: Int = 4) {
         nativeHandle = nativeCreate(gpuid, numThreads, ttaMode)

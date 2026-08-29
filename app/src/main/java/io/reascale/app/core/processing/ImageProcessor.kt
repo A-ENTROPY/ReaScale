@@ -615,42 +615,58 @@ class ImageProcessor(
         val canvas = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
         val androidCanvas = android.graphics.Canvas(canvas)
         val tileCount = plan.tiles.size.coerceAtLeast(1)
-        var processedTiles = 0
+        val doneTiles = java.util.concurrent.atomic.AtomicInteger(0)
 
-        for (tile in plan.tiles) {
-            val rect = android.graphics.Rect(
-                tile.x, tile.y,
-                (tile.x + tile.w).coerceAtMost(srcW),
-                (tile.y + tile.h).coerceAtMost(srcH)
-            )
-            val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
-                ?: throw IllegalStateException("分块解码失败 at $rect")
-            try {
-                // [FIX 2026-08-17] 块内引擎进度也细分：总进度 = (已处理块 + 块内进度) / 总块数
-                val upscaledTile = engine.upscale(
-                    input = tileBmp,
-                    plan = io.reascale.app.data.UpscalePlan(targetScale = factor),
-                    progress = { p ->
-                        progress(0.10f + ((processedTiles + p) / tileCount) * 0.80f)
+        // [PERF 2026-08-29] 主路径 tile 并行化：tile 解码+推理并发（Semaphore(4)），
+        // 拼接按序在主线程完成（canvas 不同区域，无竞争）。
+        // 前提：引擎支持并发推理——NCNN 已去 Mutex（官方多 extractor 并发）、ONNX 本就无锁。
+        val sem = kotlinx.coroutines.sync.Semaphore(4)
+        coroutineScope {
+            val jobs = plan.tiles.map { tile ->
+                async(Dispatchers.Default) {
+                    sem.acquire()
+                    try {
+                        val rect = android.graphics.Rect(
+                            tile.x, tile.y,
+                            (tile.x + tile.w).coerceAtMost(srcW),
+                            (tile.y + tile.h).coerceAtMost(srcH)
+                        )
+                        val tileBmp = RegionDecoder.decodeRegion(context, srcUri, rect)
+                            ?: throw IllegalStateException("分块解码失败 at $rect")
+                        try {
+                            val idx = doneTiles.get()
+                            val upscaledTile = engine.upscale(
+                                input = tileBmp,
+                                plan = io.reascale.app.data.UpscalePlan(targetScale = factor),
+                                progress = { p ->
+                                    progress(0.10f + ((idx + p) / tileCount) * 0.80f)
+                                }
+                            )
+                            Pair(tile, upscaledTile)
+                        } finally {
+                            if (!tileBmp.isRecycled) tileBmp.recycle()
+                        }
+                    } finally {
+                        sem.release()
                     }
-                )
+                }
+            }
+            // 按序拼接 + 回收（保留 tile 顺序，避免抖动画面）
+            for (job in jobs) {
+                val (tile, upscaledTile) = job.await()
                 try {
-                    val tileOutX = tile.x * factor
-                    val tileOutY = tile.y * factor
                     androidCanvas.drawBitmap(
                         upscaledTile,
-                        tileOutX.toFloat(),
-                        tileOutY.toFloat(),
+                        (tile.x * factor).toFloat(),
+                        (tile.y * factor).toFloat(),
                         null
                     )
                 } finally {
                     if (!upscaledTile.isRecycled) upscaledTile.recycle()
                 }
-            } finally {
-                if (!tileBmp.isRecycled) tileBmp.recycle()
+                doneTiles.incrementAndGet()
+                progress(0.10f + (doneTiles.get().toFloat() / tileCount) * 0.78f)
             }
-            processedTiles++
-            progress(0.10f + (processedTiles.toFloat() / tileCount) * 0.78f)
         }
         return canvas
     }
