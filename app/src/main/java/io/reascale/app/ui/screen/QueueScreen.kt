@@ -163,6 +163,24 @@ fun QueueScreen(
                 )
             }
 
+            // [UX-FIX 2026-08-30] 操作按钮移到列表顶部：数千张队列无需滚到底部操作
+            item {
+                GlobalActions(
+                    canPause = isRunnerRunning,
+                    canStart = !isRunnerRunning && pending.isNotEmpty(),
+                    onPause = {
+                        app.setProcessingEnabled(false)
+                        scope.launch { app.queueRunner.pause() }
+                    },
+                    onStart = {
+                        app.setProcessingEnabled(true)
+                        app.queueRunner.start()
+                    },
+                    onClear = { scope.launch { app.queueManager.clearFinished() } },
+                    onClearAll = { scope.launch { app.queueManager.clearAll() } }
+                )
+            }
+
             if (running.isNotEmpty()) {
                 item { SectionHeader(stringResource(R.string.queue_running), running.size) }
                 items(running, key = { it.id }) { j ->
@@ -199,24 +217,6 @@ fun QueueScreen(
                         onRemove = { id -> scope.launch { app.queueManager.remove(id) } }
                     )
                 }
-            }
-
-            item { Spacer(Modifier.height(Spacing.md)) }
-            item {
-                GlobalActions(
-                    canPause = isRunnerRunning,
-                    canStart = !isRunnerRunning && pending.isNotEmpty(),
-                    onPause = {
-                        app.setProcessingEnabled(false)
-                        scope.launch { app.queueRunner.pause() }
-                    },
-                    onStart = {
-                        app.setProcessingEnabled(true)
-                        app.queueRunner.start()
-                    },
-                    onClear = { scope.launch { app.queueManager.clearFinished() } },
-                    onClearAll = { scope.launch { app.queueManager.clearAll() } }
-                )
             }
 
             } // LazyColumn end
