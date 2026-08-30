@@ -106,12 +106,12 @@ class NcnnEngine(
                     LogBus.i("NcnnEngine", "🔄 加载模型: $paramPath (noise=$currentNoise)")
                 }
 
-                rn.setTileSize(192)  // 固定官方推荐值
+                rn.setTileSize(256)  // [PERF] 192→256：ROI 重叠浪费 1.41→1.30，tile 数 -27%
                 rn.setNumThreads(numThreads)
 
                 engine = rn
                 isInitialized = true
-                LogBus.i("NcnnEngine", "✅ NCNN 引擎初始化成功: $engineId, gpuid=$gpuid, tileSize=192")
+                LogBus.i("NcnnEngine", "✅ NCNN 引擎初始化成功: $engineId, gpuid=$gpuid, tileSize=256")
             } catch (t: Throwable) {
                 rn.release()
                 LogBus.e("NcnnEngine", "❌ ncnn init failed", t)
@@ -140,10 +140,11 @@ class NcnnEngine(
         val params = paramsProvider()
         val nativeScale = baseScale
         // [FIX 2026-08-16] 只读 3 个可调参数，其余强制模型默认值
-        // tileSize 固定 192；prepadding 由 C++ 自动探测（模型精确 crop 反推），Kotlin 不猜测
+        // tileSize 256（[PERF] 原 192 与流式解码 256 不一致 → 双重重分块浪费；已对齐）；
+        // prepadding 由 C++ 自动探测（模型精确 crop 反推），Kotlin 不猜测
         val prepad = 0  // 0 = 让 C++ 用探测值
         val noise = if (params.noiseLevel.enabled) params.noiseLevel.value else -1
-        val tileSize = 192
+        val tileSize = 256  // [PERF] 与流式解码 tile 对齐，消除 C++ 256→192 双重重分块
         // [PERF 2026-08-29] noise 变化 → 重载模型。并发推理期间不能立即 close 旧引擎
         // （可能正在使用）：reloadMonitor 互斥切换引用，旧引擎延迟 5s 由 appScope 释放
         if (noise != currentNoise) {

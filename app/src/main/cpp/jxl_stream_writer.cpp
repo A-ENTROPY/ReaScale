@@ -469,7 +469,9 @@ Java_io_reascale_app_core_encode_JxlStreamWriter_nativeCreate(
   se->fs = g_api.frameSettingsCreate(se->enc, nullptr);
   if (!se->fs) { se->failed = true; se->error = "frameSettingsCreate failed"; return 0; }
 
-  int effort = 7;  // squirrel，与 jxl-coder 相近画质档
+  // [PERF 2026-08-30] effort 7(squirrel)→5(hare)：大图编码时间显著下降，画质/体积几乎无损。
+  // 与整图路径 jxl-coder FALCON(≈effort3) 相比取中间档，避免流式大图编码成为瓶颈。
+  int effort = 5;  // hare，流式大图提速档
   g_api.setOption(se->fs, JXL_ENC_FRAME_SETTING_EFFORT, effort);
   if (lossless == JXL_TRUE) {
     g_api.setFrameLossless(se->fs, JXL_TRUE);
